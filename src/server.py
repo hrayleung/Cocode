@@ -140,7 +140,7 @@ async def clear_index(path: str | None = None) -> dict:
         if not resolved_path.exists() or not resolved_path.is_dir():
             return {"error": f"Path does not exist or is not a directory: {path}"}
 
-        repo_name = indexer.path_to_repo_name(str(resolved_path))
+        repo_name = indexer.resolve_repo_name(resolved_path)
         indexer._delete_index(repo_name)
 
         return {
@@ -158,9 +158,12 @@ def main():
     """Main entry point for MCP server."""
     logger.info("Starting cocode MCP server...")
 
-    if not settings.openai_api_key:
+    has_openai = bool(settings.openai_api_key)
+    has_jina = bool(settings.jina_api_key) and settings.use_late_chunking
+
+    if not has_openai and not has_jina:
         logger.error(
-            "OPENAI_API_KEY is required. "
+            "Either OPENAI_API_KEY or JINA_API_KEY (with USE_LATE_CHUNKING=true) is required. "
             "Set it in your environment or .env file."
         )
         sys.exit(1)

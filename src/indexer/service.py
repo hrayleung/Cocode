@@ -68,6 +68,52 @@ class IndexerService:
             name = 'repo'
         return name
 
+    def resolve_repo_name(self, path: str | Path) -> str:
+        """Resolve a stable repo name for a given path.
+
+        Uses the directory-based name when unambiguous. If that name is already
+        taken by a different path, appends a short hash suffix to avoid
+        collisions (allowing multiple repos with the same folder name).
+
+        Returns:
+            A unique repo name string for this path.
+        """
+        import hashlib
+
+        resolved = Path(path).resolve()
+        resolved_str = str(resolved)
+        base = self.path_to_repo_name(resolved_str)
+
+        def get_repo_safe(name: str):
+            """Get repo, returning None on any error (including DB issues)."""
+            try:
+                return self._repo_manager.get_repo(name)
+            except Exception as e:
+                logger.debug(f"Could not lookup repo '{name}': {e}")
+                return None
+
+        # Prefer an exact path match when we already know this repo.
+        existing_base = get_repo_safe(base)
+        if existing_base is None or existing_base.path == resolved_str:
+            return base
+
+        # Base name is taken by a different path: use a hashed variant.
+        digest = hashlib.sha1(resolved_str.encode("utf-8")).hexdigest()
+
+        # Try increasing hash prefix lengths until we find a unique name
+        for prefix_len in (8, 12, 16, 40):
+            hashed = f"{base}_{digest[:prefix_len]}"
+            existing_hashed = get_repo_safe(hashed)
+            if existing_hashed is None:
+                # Name is available
+                return hashed
+            if existing_hashed.path == resolved_str:
+                # Found existing entry for this exact path
+                return hashed
+
+        # Fallback: full hash (should never happen in practice)
+        return f"{base}_{digest}"
+
     def _validate_path(self, path: str) -> Path:
         """Validate and resolve a path."""
         resolved = Path(path).resolve()
@@ -221,7 +267,7 @@ class IndexerService:
             IndexingError: If indexing fails
         """
         resolved_path = self._validate_path(path)
-        repo_name = self.path_to_repo_name(str(resolved_path))
+        repo_name = self.resolve_repo_name(resolved_path)
         repo_path = str(resolved_path)
 
         repo = self._repo_manager.get_repo(repo_name)

@@ -2,6 +2,7 @@
 
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import cocoindex
@@ -88,8 +89,19 @@ EXTENSION_TO_LANGUAGE = {
     ".mdx": "markdown",
 }
 
-# Cache for flow objects to avoid "already exists" errors
-_flow_cache: dict[str, object] = {}
+@dataclass
+class CachedFlow:
+    """Cached CocoIndex flow with its defining inputs."""
+
+    flow: cocoindex.Flow
+    repo_path: str
+    included_patterns: tuple[str, ...]
+    excluded_patterns: tuple[str, ...]
+
+
+# Cache for open flows to avoid "already exists" errors.
+# If the repo_path/patterns change, we close + recreate the flow.
+_flow_cache: dict[str, CachedFlow] = {}
 
 
 @cocoindex.op.function(behavior_version=1)
@@ -137,7 +149,11 @@ def use_jina_embeddings() -> bool:
             json={
                 "model": settings.jina_model,
                 "input": ["test"],
-                "dimensions": 64,  # Minimal dimensions for quick test
+                # Use configured dimensions to avoid false negatives if a model
+                # doesn't support arbitrary dimension downsampling.
+                "dimensions": settings.embedding_dimensions,
+                "task": "retrieval.query",
+                "normalized": True,
             },
             timeout=10.0,
         )
@@ -205,17 +221,29 @@ def create_indexing_flow(
     """
     flow_name = f"CodeIndex_{repo_name}"
 
-    # Return cached flow if exists
-    if flow_name in _flow_cache:
-        return _flow_cache[flow_name]
-
     if included_patterns is None:
         # Use **/* glob pattern to match files recursively in subdirectories
         included_patterns = [f"**/*{ext}" for ext in settings.included_extensions]
     if excluded_patterns is None:
         excluded_patterns = settings.excluded_patterns
+    included_patterns_key = tuple(included_patterns)
+    excluded_patterns_key = tuple(excluded_patterns)
 
-    @cocoindex.flow_def(name=flow_name)
+    cached = _flow_cache.get(flow_name)
+    if cached:
+        if (
+            cached.repo_path == repo_path
+            and cached.included_patterns == included_patterns_key
+            and cached.excluded_patterns == excluded_patterns_key
+        ):
+            return cached.flow
+
+        try:
+            cached.flow.close()
+        except Exception as e:
+            logger.debug(f"Failed to close cached flow {flow_name}: {e}")
+        _flow_cache.pop(flow_name, None)
+
     def code_indexing_flow(
         flow_builder: cocoindex.FlowBuilder,
         data_scope: cocoindex.DataScope,
@@ -295,9 +323,14 @@ def create_indexing_flow(
             ],
         )
 
-    # Cache and return
-    _flow_cache[flow_name] = code_indexing_flow
-    return code_indexing_flow
+    flow = cocoindex.open_flow(flow_name, code_indexing_flow)
+    _flow_cache[flow_name] = CachedFlow(
+        flow=flow,
+        repo_path=repo_path,
+        included_patterns=included_patterns_key,
+        excluded_patterns=excluded_patterns_key,
+    )
+    return flow
 
 
 def get_cached_flow(repo_name: str):
@@ -310,21 +343,29 @@ def get_cached_flow(repo_name: str):
         Cached flow object or None if not cached
     """
     flow_name = f"CodeIndex_{repo_name}"
-    return _flow_cache.get(flow_name)
+    cached = _flow_cache.get(flow_name)
+    return cached.flow if cached else None
 
 
 def clear_flow_cache(repo_name: str | None = None) -> None:
     """Clear cached flows.
-
-    Note: Clearing the cache means the flow cannot be re-created in the same
-    process due to CocoIndex's global flow registry. Only clear when you
-    don't intend to re-index in the same session.
 
     Args:
         repo_name: If provided, clear only this repo's flow. Otherwise clear all.
     """
     if repo_name:
         flow_name = f"CodeIndex_{repo_name}"
-        _flow_cache.pop(flow_name, None)
-    else:
-        _flow_cache.clear()
+        cached = _flow_cache.pop(flow_name, None)
+        if cached:
+            try:
+                cached.flow.close()
+            except Exception as e:
+                logger.debug(f"Failed to close flow {flow_name}: {e}")
+        return
+
+    for flow_name, cached in list(_flow_cache.items()):
+        try:
+            cached.flow.close()
+        except Exception as e:
+            logger.debug(f"Failed to close flow {flow_name}: {e}")
+    _flow_cache.clear()

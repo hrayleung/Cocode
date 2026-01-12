@@ -16,29 +16,6 @@ CREATE TABLE IF NOT EXISTS repos (
 );
 """
 
-# Template for per-repo chunk tables (created dynamically)
-CHUNKS_TABLE_TEMPLATE = """
-CREATE TABLE IF NOT EXISTS {schema}.chunks (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    filename TEXT NOT NULL,
-    location TEXT,  -- e.g., "10:50" for lines 10-50
-    content TEXT NOT NULL,
-    embedding vector({dimensions}),
-    content_tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS {schema}_chunks_embedding_idx
-ON {schema}.chunks USING hnsw (embedding vector_cosine_ops);
-
-CREATE INDEX IF NOT EXISTS {schema}_chunks_content_tsv_idx
-ON {schema}.chunks USING GIN (content_tsv);
-
-CREATE INDEX IF NOT EXISTS {schema}_chunks_filename_idx
-ON {schema}.chunks (filename);
-"""
-
 
 def get_create_schema_sql(repo_name: str) -> sql.Composed:
     """Generate SQL to create a schema for a repository."""
@@ -51,9 +28,40 @@ def get_create_schema_sql(repo_name: str) -> sql.Composed:
 def get_create_chunks_table_sql(repo_name: str, dimensions: int = 3072) -> sql.Composed:
     """Generate SQL to create chunks table for a repository."""
     schema_name = repo_name.replace("-", "_").replace(".", "_").lower()
-    return sql.SQL(CHUNKS_TABLE_TEMPLATE).format(
-        schema=sql.Identifier(schema_name),
-        dimensions=sql.Literal(dimensions)
+    chunks_table = sql.Identifier(schema_name, "chunks")
+
+    embedding_index = sql.Identifier(f"{schema_name}_chunks_embedding_idx")
+    content_tsv_index = sql.Identifier(f"{schema_name}_chunks_content_tsv_idx")
+    filename_index = sql.Identifier(f"{schema_name}_chunks_filename_idx")
+
+    return sql.SQL(
+        """
+        CREATE TABLE IF NOT EXISTS {chunks_table} (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            filename TEXT NOT NULL,
+            location TEXT,  -- e.g., "10:50" for lines 10-50
+            content TEXT NOT NULL,
+            embedding vector({dimensions}),
+            content_tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS {embedding_index}
+        ON {chunks_table} USING hnsw (embedding vector_cosine_ops);
+
+        CREATE INDEX IF NOT EXISTS {content_tsv_index}
+        ON {chunks_table} USING GIN (content_tsv);
+
+        CREATE INDEX IF NOT EXISTS {filename_index}
+        ON {chunks_table} (filename);
+        """
+    ).format(
+        chunks_table=chunks_table,
+        dimensions=sql.Literal(dimensions),
+        embedding_index=embedding_index,
+        content_tsv_index=content_tsv_index,
+        filename_index=filename_index,
     )
 
 

@@ -133,35 +133,34 @@ def add_code_fts_to_table(table_name: str) -> bool:
                     SELECT 1 FROM information_schema.columns
                     WHERE table_name = %s AND column_name = 'content_tsv'
                 """, (table_name,))
+                has_content_tsv = cur.fetchone() is not None
 
-                if cur.fetchone():
-                    logger.debug(f"content_tsv already exists on {table_name}")
-                    return True
-
-                # Check if normalize_code_text function exists
-                cur.execute("""
-                    SELECT 1 FROM pg_proc WHERE proname = 'normalize_code_text'
-                """)
-
-                if cur.fetchone():
-                    # Use code-aware tsvector
-                    cur.execute(f"""
-                        ALTER TABLE {table_name}
-                        ADD COLUMN content_tsv tsvector
-                        GENERATED ALWAYS AS (
-                            to_tsvector('english', coalesce(content, '')) ||
-                            to_tsvector('simple', coalesce(normalize_code_text(content), ''))
-                        ) STORED
+                if not has_content_tsv:
+                    # Check if normalize_code_text function exists
+                    cur.execute("""
+                        SELECT 1 FROM pg_proc WHERE proname = 'normalize_code_text'
                     """)
-                else:
-                    # Fall back to standard English tsvector
-                    cur.execute(f"""
-                        ALTER TABLE {table_name}
-                        ADD COLUMN content_tsv tsvector
-                        GENERATED ALWAYS AS (
-                            to_tsvector('english', coalesce(content, ''))
-                        ) STORED
-                    """)
+                    has_normalize_func = cur.fetchone() is not None
+
+                    if has_normalize_func:
+                        # Use code-aware tsvector
+                        cur.execute(f"""
+                            ALTER TABLE {table_name}
+                            ADD COLUMN content_tsv tsvector
+                            GENERATED ALWAYS AS (
+                                to_tsvector('english', coalesce(content, '')) ||
+                                to_tsvector('simple', coalesce(normalize_code_text(content), ''))
+                            ) STORED
+                        """)
+                    else:
+                        # Fall back to standard English tsvector
+                        cur.execute(f"""
+                            ALTER TABLE {table_name}
+                            ADD COLUMN content_tsv tsvector
+                            GENERATED ALWAYS AS (
+                                to_tsvector('english', coalesce(content, ''))
+                            ) STORED
+                        """)
 
                 # Create GIN index
                 index_name = f"idx_{table_name.replace('.', '_')}_content_tsv"
@@ -171,7 +170,7 @@ def add_code_fts_to_table(table_name: str) -> bool:
                 """)
 
             conn.commit()
-            logger.info(f"Added code FTS to {table_name}")
+            logger.info(f"Ensured code FTS on {table_name}")
             return True
 
     except Exception as e:

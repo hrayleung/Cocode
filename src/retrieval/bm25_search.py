@@ -364,8 +364,9 @@ def _ensure_basic_fts_index(repo_name: str) -> bool:
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = %s AND column_name = 'content_tsv'
                 """, (table_name,))
+                has_tsv_column = cur.fetchone() is not None
 
-                if not cur.fetchone():
+                if not has_tsv_column:
                     # Add tsvector column
                     cur.execute(f"""
                         ALTER TABLE {table_name}
@@ -373,14 +374,14 @@ def _ensure_basic_fts_index(repo_name: str) -> bool:
                         GENERATED ALWAYS AS (to_tsvector('english', coalesce(content, ''))) STORED
                     """)
 
-                    # Create GIN index
-                    cur.execute(f"""
-                        CREATE INDEX IF NOT EXISTS idx_{table_name}_content_tsv
-                        ON {table_name} USING GIN(content_tsv)
-                    """)
+                # Always ensure the GIN index exists (can be missing even if column exists)
+                cur.execute(f"""
+                    CREATE INDEX IF NOT EXISTS idx_{table_name}_content_tsv
+                    ON {table_name} USING GIN(content_tsv)
+                """)
 
-                    conn.commit()
-                    logger.info(f"Created basic FTS index for {table_name}")
+                conn.commit()
+                logger.info(f"Ensured basic FTS index for {table_name}")
 
                 return True
 
