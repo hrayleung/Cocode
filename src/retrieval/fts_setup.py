@@ -1,0 +1,205 @@
+"""Code-specific PostgreSQL text search configuration.
+
+Creates a text search configuration optimized for source code that:
+- Handles camelCase and snake_case identifiers
+- Removes code-specific stop words
+- Preserves numbers and symbols in identifiers
+"""
+
+from src.storage.postgres import get_connection
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+# SQL to create a code-aware text search configuration
+CREATE_CODE_TS_CONFIG = """
+-- Create a custom text search configuration based on 'simple'
+-- 'simple' doesn't do stemming which is better for code identifiers
+DO $$
+BEGIN
+    -- Create the configuration if it doesn't exist
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_ts_config WHERE cfgname = 'code'
+    ) THEN
+        -- Create configuration based on simple (no stemming)
+        CREATE TEXT SEARCH CONFIGURATION code (COPY = simple);
+
+        -- Use simple dictionary (no stemming, preserves original tokens)
+        -- This is important for code where "function" and "functions" are different
+    END IF;
+END $$;
+"""
+
+# SQL to create a function that normalizes code identifiers
+CREATE_CODE_NORMALIZE_FUNC = """
+CREATE OR REPLACE FUNCTION normalize_code_text(content TEXT)
+RETURNS TEXT AS $$
+DECLARE
+    result TEXT;
+BEGIN
+    -- Start with original content
+    result := content;
+
+    -- Split camelCase: getUserName -> get User Name
+    -- Handle lowercase followed by uppercase
+    result := regexp_replace(result, '([a-z])([A-Z])', E'\\1 \\2', 'g');
+
+    -- Handle acronyms followed by regular words: XMLParser -> XML Parser
+    result := regexp_replace(result, '([A-Z]+)([A-Z][a-z])', E'\\1 \\2', 'g');
+
+    -- Split snake_case and SCREAMING_SNAKE_CASE
+    result := regexp_replace(result, '_+', ' ', 'g');
+
+    -- Split kebab-case
+    result := regexp_replace(result, '-+', ' ', 'g');
+
+    -- Remove common code noise (but keep the words)
+    result := regexp_replace(result, '[\(\)\[\]\{\}\<\>:;,\.]', ' ', 'g');
+
+    -- Collapse multiple spaces
+    result := regexp_replace(result, '\s+', ' ', 'g');
+
+    -- Return trimmed result
+    RETURN trim(result);
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+"""
+
+# SQL to create enhanced tsvector for code
+CREATE_CODE_TSVECTOR_FUNC = """
+CREATE OR REPLACE FUNCTION code_to_tsvector(content TEXT)
+RETURNS tsvector AS $$
+BEGIN
+    -- Combine original content with normalized version
+    -- This allows searching for either "getUserById" or "user"
+    RETURN to_tsvector('english', content) ||
+           to_tsvector('simple', normalize_code_text(content));
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+"""
+
+
+def create_code_text_search_config() -> bool:
+    """Create PostgreSQL text search configuration for code.
+
+    Creates:
+    - 'code' text search configuration
+    - normalize_code_text function
+    - code_to_tsvector function
+
+    Returns:
+        True if successful
+    """
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                # Create the code text search configuration
+                cur.execute(CREATE_CODE_TS_CONFIG)
+
+                # Create the normalization function
+                cur.execute(CREATE_CODE_NORMALIZE_FUNC)
+
+                # Create the enhanced tsvector function
+                cur.execute(CREATE_CODE_TSVECTOR_FUNC)
+
+            conn.commit()
+            logger.info("Created code text search configuration")
+            return True
+
+    except Exception as e:
+        logger.error(f"Failed to create code text search config: {e}")
+        return False
+
+
+def add_code_fts_to_table(table_name: str) -> bool:
+    """Add code-aware full-text search column to an existing table.
+
+    Creates:
+    - content_tsv column with code-aware tsvector
+    - GIN index on content_tsv
+
+    Args:
+        table_name: Name of the table to modify
+
+    Returns:
+        True if successful
+    """
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                # Check if content_tsv column already exists
+                cur.execute("""
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = %s AND column_name = 'content_tsv'
+                """, (table_name,))
+
+                if cur.fetchone():
+                    logger.debug(f"content_tsv already exists on {table_name}")
+                    return True
+
+                # Check if normalize_code_text function exists
+                cur.execute("""
+                    SELECT 1 FROM pg_proc WHERE proname = 'normalize_code_text'
+                """)
+
+                if cur.fetchone():
+                    # Use code-aware tsvector
+                    cur.execute(f"""
+                        ALTER TABLE {table_name}
+                        ADD COLUMN content_tsv tsvector
+                        GENERATED ALWAYS AS (
+                            to_tsvector('english', coalesce(content, '')) ||
+                            to_tsvector('simple', coalesce(normalize_code_text(content), ''))
+                        ) STORED
+                    """)
+                else:
+                    # Fall back to standard English tsvector
+                    cur.execute(f"""
+                        ALTER TABLE {table_name}
+                        ADD COLUMN content_tsv tsvector
+                        GENERATED ALWAYS AS (
+                            to_tsvector('english', coalesce(content, ''))
+                        ) STORED
+                    """)
+
+                # Create GIN index
+                index_name = f"idx_{table_name.replace('.', '_')}_content_tsv"
+                cur.execute(f"""
+                    CREATE INDEX IF NOT EXISTS {index_name}
+                    ON {table_name} USING GIN(content_tsv)
+                """)
+
+            conn.commit()
+            logger.info(f"Added code FTS to {table_name}")
+            return True
+
+    except Exception as e:
+        logger.error(f"Failed to add code FTS to {table_name}: {e}")
+        return False
+
+
+def setup_fts_for_repo(repo_name: str) -> bool:
+    """Set up full-text search for a repository.
+
+    Ensures:
+    - Code text search configuration exists
+    - Repository table has content_tsv column
+    - GIN index exists on content_tsv
+
+    Args:
+        repo_name: Name of the repository
+
+    Returns:
+        True if successful
+    """
+    from .vector_search import get_table_name
+
+    # First ensure the code text search config exists
+    create_code_text_search_config()
+
+    # Get the table name for this repo
+    table_name = get_table_name(repo_name)
+
+    # Add FTS columns and indexes
+    return add_code_fts_to_table(table_name)

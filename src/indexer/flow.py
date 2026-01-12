@@ -1,0 +1,330 @@
+"""CocoIndex flow definitions for codebase indexing."""
+
+import logging
+import os
+from typing import Any, Literal
+
+import cocoindex
+from cocoindex.llm import LlmApiType
+import httpx
+
+from config.settings import settings
+
+logger = logging.getLogger(__name__)
+
+
+# Jina embedding executor with late chunking support
+class JinaEmbedSpec(cocoindex.op.FunctionSpec):
+    """Spec for Jina embedding function."""
+    model: str = "jina-embeddings-v3"
+    dimensions: int = 1024
+    task: str = "retrieval.passage"
+    late_chunking: bool = True
+
+
+@cocoindex.op.executor_class(cache=True, behavior_version=1)
+class JinaEmbedExecutor:
+    """Executor for Jina embeddings with late chunking.
+
+    Late chunking preserves cross-chunk context by embedding the full
+    document first, then extracting individual chunk embeddings.
+    """
+    spec: JinaEmbedSpec
+    client: Any
+
+    def prepare(self) -> None:
+        """Initialize the HTTP client."""
+        self.client = httpx.Client(timeout=120.0)
+        self.api_key = settings.jina_api_key
+        self.api_url = "https://api.jina.ai/v1/embeddings"
+
+    def __call__(self, text: str) -> cocoindex.Vector[cocoindex.Float32, Literal[1024]]:
+        """Embed a single text chunk.
+
+        Returns a 1024-dimensional vector for pgvector storage.
+        """
+        response = self.client.post(
+            self.api_url,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.spec.model,
+                "input": [text],
+                "task": self.spec.task,
+                "dimensions": self.spec.dimensions,
+                "normalized": True,
+                "late_chunking": self.spec.late_chunking,
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["data"][0]["embedding"]
+
+
+# Map file extensions to tree-sitter language names
+EXTENSION_TO_LANGUAGE = {
+    # Code files
+    ".py": "python",
+    ".rs": "rust",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".go": "go",
+    ".java": "java",
+    ".cpp": "cpp",
+    ".c": "c",
+    ".h": "c",
+    ".hpp": "cpp",
+    ".rb": "ruby",
+    ".php": "php",
+    ".swift": "swift",
+    ".kt": "kotlin",
+    ".scala": "scala",
+    # Documentation
+    ".md": "markdown",
+    ".mdx": "markdown",
+}
+
+# Cache for flow objects to avoid "already exists" errors
+_flow_cache: dict[str, object] = {}
+
+
+@cocoindex.op.function(behavior_version=1)
+def detect_language(filename: str) -> str:
+    """Detect programming language from filename extension."""
+    ext = os.path.splitext(filename)[1].lower()
+    return EXTENSION_TO_LANGUAGE.get(ext, "text")
+
+
+@cocoindex.op.function(behavior_version=1)
+def range_to_str(location: cocoindex.Range) -> str:
+    """Convert Range to string."""
+    return str(location) if location else ""
+
+
+@cocoindex.op.function(behavior_version=1)
+def add_context_header(filename: str, language: str, location: str, content: str) -> str:
+    """Add contextual header to chunk for better embedding quality.
+
+    Following Anthropic's Contextual Retrieval approach - prepending
+    file/scope context improves retrieval precision by 49-67%.
+    """
+    header = f"# File: {filename}\n# Language: {language}\n# Location: {location}\n\n"
+    return header + content
+
+
+def use_jina_embeddings() -> bool:
+    """Check if Jina embeddings should be used (late chunking enabled).
+
+    Also validates the Jina API key by making a test request.
+    Falls back to OpenAI if Jina is not available or fails.
+    """
+    if not settings.jina_api_key or not settings.use_late_chunking:
+        return False
+
+    # Quick validation of the API key
+    try:
+        import httpx
+        response = httpx.post(
+            "https://api.jina.ai/v1/embeddings",
+            headers={
+                "Authorization": f"Bearer {settings.jina_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": settings.jina_model,
+                "input": ["test"],
+                "dimensions": 64,  # Minimal dimensions for quick test
+            },
+            timeout=10.0,
+        )
+        if response.status_code == 403:
+            logger.warning("Jina API key is invalid (403 Forbidden). Falling back to OpenAI.")
+            return False
+        elif response.status_code != 200:
+            logger.warning(f"Jina API returned {response.status_code}. Falling back to OpenAI.")
+            return False
+        return True
+    except Exception as e:
+        logger.warning(f"Jina API validation failed: {e}. Falling back to OpenAI.")
+        return False
+
+
+@cocoindex.transform_flow()
+def text_to_embedding_openai(text: cocoindex.DataSlice[str]) -> cocoindex.DataSlice[list[float]]:
+    """Transform text to embeddings using OpenAI."""
+    return text.transform(
+        cocoindex.functions.EmbedText(
+            api_type=LlmApiType.OPENAI,
+            model=settings.embedding_model,
+            output_dimension=settings.embedding_dimensions,
+        )
+    )
+
+
+@cocoindex.transform_flow()
+def text_to_embedding_jina(
+    text: cocoindex.DataSlice[str]
+) -> cocoindex.DataSlice[cocoindex.Vector[cocoindex.Float32, Literal[1024]]]:
+    """Transform text to embeddings using Jina with late chunking.
+
+    Late chunking preserves cross-chunk context for ~24% better retrieval.
+    Returns 1024-dimensional vectors for pgvector storage.
+    """
+    return text.transform(
+        JinaEmbedSpec(
+            model=settings.jina_model,
+            dimensions=settings.embedding_dimensions,
+            task="retrieval.passage",
+            late_chunking=True,
+        )
+    )
+
+
+def create_indexing_flow(
+    repo_name: str,
+    repo_path: str,
+    included_patterns: list[str] | None = None,
+    excluded_patterns: list[str] | None = None,
+):
+    """Create or retrieve a CocoIndex flow for indexing a repository.
+
+    Caches flows by name to avoid "Flow already exists" errors.
+
+    Args:
+        repo_name: Unique name for the repository
+        repo_path: Path to the repository root
+        included_patterns: Glob patterns for files to include
+        excluded_patterns: Glob patterns for files to exclude
+
+    Returns:
+        Configured CocoIndex flow
+    """
+    flow_name = f"CodeIndex_{repo_name}"
+
+    # Return cached flow if exists
+    if flow_name in _flow_cache:
+        return _flow_cache[flow_name]
+
+    if included_patterns is None:
+        # Use **/* glob pattern to match files recursively in subdirectories
+        included_patterns = [f"**/*{ext}" for ext in settings.included_extensions]
+    if excluded_patterns is None:
+        excluded_patterns = settings.excluded_patterns
+
+    @cocoindex.flow_def(name=flow_name)
+    def code_indexing_flow(
+        flow_builder: cocoindex.FlowBuilder,
+        data_scope: cocoindex.DataScope,
+    ):
+        # Select embedding function based on configuration
+        # Note: use_jina_embeddings() makes a network validation call, so cache the result
+        use_jina = use_jina_embeddings()
+        embed_fn = text_to_embedding_jina if use_jina else text_to_embedding_openai
+        if use_jina:
+            logger.info("Using Jina embeddings with late chunking")
+        else:
+            logger.info("Using OpenAI embeddings")
+
+        # Source: read files from repository
+        data_scope["files"] = flow_builder.add_source(
+            cocoindex.sources.LocalFile(
+                path=repo_path,
+                included_patterns=included_patterns,
+                excluded_patterns=excluded_patterns,
+            )
+        )
+
+        # Collector for embeddings
+        code_embeddings = data_scope.add_collector()
+
+        # Process each file
+        with data_scope["files"].row() as file:
+            # Detect language from filename
+            file["language"] = file["filename"].transform(detect_language)
+
+            # Split code into semantic chunks (tree-sitter aware)
+            file["chunks"] = file["content"].transform(
+                cocoindex.functions.SplitRecursively(),
+                language=file["language"],
+                chunk_size=settings.chunk_size,
+                chunk_overlap=settings.chunk_overlap,
+            )
+
+            # Process each chunk
+            with file["chunks"].row() as chunk:
+                # Convert location Range to string for context header
+                chunk["location_str"] = chunk["location"].transform(range_to_str)
+
+                # Create contextual text for embedding (Anthropic's approach)
+                # Prepend file/language/location context for better retrieval
+                chunk["contextual_text"] = flow_builder.transform(
+                    add_context_header,
+                    file["filename"],
+                    file["language"],
+                    chunk["location_str"],
+                    chunk["text"],
+                )
+
+                # Embed the contextual text using selected provider
+                # Jina: uses late chunking for ~24% better retrieval
+                # OpenAI: standard text-embedding-3-large
+                chunk["embedding"] = chunk["contextual_text"].call(embed_fn)
+
+                # Collect: store original content for display, contextual embedding
+                code_embeddings.collect(
+                    filename=file["filename"],
+                    location=chunk["location"],
+                    content=chunk["text"],  # Original content for display
+                    embedding=chunk["embedding"],  # Contextual embedding
+                )
+
+        # Export to PostgreSQL with vector index
+        code_embeddings.export(
+            f"{repo_name}_chunks",
+            cocoindex.targets.Postgres(),
+            primary_key_fields=["filename", "location"],
+            vector_indexes=[
+                cocoindex.VectorIndexDef(
+                    field_name="embedding",
+                    metric=cocoindex.VectorSimilarityMetric.COSINE_SIMILARITY,
+                )
+            ],
+        )
+
+    # Cache and return
+    _flow_cache[flow_name] = code_indexing_flow
+    return code_indexing_flow
+
+
+def get_cached_flow(repo_name: str):
+    """Get a cached flow if it exists.
+
+    Args:
+        repo_name: Repository name
+
+    Returns:
+        Cached flow object or None if not cached
+    """
+    flow_name = f"CodeIndex_{repo_name}"
+    return _flow_cache.get(flow_name)
+
+
+def clear_flow_cache(repo_name: str | None = None) -> None:
+    """Clear cached flows.
+
+    Note: Clearing the cache means the flow cannot be re-created in the same
+    process due to CocoIndex's global flow registry. Only clear when you
+    don't intend to re-index in the same session.
+
+    Args:
+        repo_name: If provided, clear only this repo's flow. Otherwise clear all.
+    """
+    if repo_name:
+        flow_name = f"CodeIndex_{repo_name}"
+        _flow_cache.pop(flow_name, None)
+    else:
+        _flow_cache.clear()

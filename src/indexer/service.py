@@ -1,0 +1,399 @@
+"""Indexer service - handles all codebase indexing operations."""
+
+import logging
+import os
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+
+import cocoindex
+
+from config.settings import settings
+from src.exceptions import IndexingError, PathError
+from src.indexer.flow import create_indexing_flow
+from src.indexer.repo_manager import RepoManager
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class IndexResult:
+    """Result of an indexing operation."""
+    repo_name: str
+    status: str  # 'created', 'updated', 'unchanged', 'error'
+    file_count: int = 0
+    chunk_count: int = 0
+    message: str | None = None
+
+
+class IndexerService:
+    """Service for indexing codebases.
+
+    Handles automatic indexing on first use and incremental updates.
+    """
+
+    def __init__(self):
+        self._repo_manager = RepoManager()
+        self._initialized = False
+
+    def _init_cocoindex(self) -> None:
+        """Initialize CocoIndex with required environment variables."""
+        if self._initialized:
+            return
+
+        os.environ["COCOINDEX_DATABASE_URL"] = settings.database_url
+        os.environ["OPENAI_API_KEY"] = settings.openai_api_key
+        cocoindex.init()
+        self._initialized = True
+
+    @staticmethod
+    def path_to_repo_name(path: str) -> str:
+        """Convert a path to a consistent repository name.
+
+        Uses a whitelist approach - only allows lowercase alphanumeric and underscore.
+        Does NOT add prefixes to preserve backward compatibility with existing indexes.
+        """
+        import re
+        resolved = Path(path).resolve()
+        # Use directory name, sanitized for PostgreSQL
+        name = resolved.name.lower()
+        # Replace common separators with underscores
+        name = re.sub(r'[-. ]+', '_', name)
+        # Remove any remaining invalid characters (whitelist approach)
+        name = re.sub(r'[^a-z0-9_]', '', name)
+        # Remove leading/trailing underscores
+        name = name.strip('_')
+        # Ensure we have a valid name
+        if not name:
+            name = 'repo'
+        return name
+
+    def _validate_path(self, path: str) -> Path:
+        """Validate and resolve a path."""
+        resolved = Path(path).resolve()
+
+        if not resolved.exists():
+            raise PathError(f"Path does not exist: {path}")
+        if not resolved.is_dir():
+            raise PathError(f"Path is not a directory: {path}")
+
+        return resolved
+
+    def _get_stats(self, repo_name: str) -> tuple[int, int]:
+        """Get current file and chunk counts."""
+        file_count = self._repo_manager.get_file_count(repo_name)
+        chunk_count = self._repo_manager.get_chunk_count(repo_name)
+        return file_count, chunk_count
+
+    def _has_files_changed(self, repo_name: str, repo_path: str) -> bool:
+        """Check if any indexed files have changed.
+
+        Detects changes by comparing:
+        1. Set of indexed files vs current files on disk
+        2. File modification times vs last index time
+        """
+        import fnmatch
+        from pathlib import Path
+
+        table_name = self._repo_manager._get_table_name(repo_name)
+        repo_path_obj = Path(repo_path)
+
+        from src.storage.postgres import get_connection
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                # Get distinct filenames from indexed chunks
+                cur.execute(f"""
+                    SELECT DISTINCT filename
+                    FROM {table_name}
+                """)
+                stored_files = {row[0] for row in cur.fetchall()}
+
+        # Get current files on disk (relative to repo_path)
+        from config.settings import settings
+
+        def is_excluded(file_path: Path) -> bool:
+            """Check if a file path matches any excluded pattern."""
+            # Check each path component against excluded patterns
+            for part in file_path.parts:
+                for pattern in settings.excluded_patterns:
+                    # Handle glob-style patterns (e.g., ".*" for dotfiles)
+                    if fnmatch.fnmatch(part, pattern):
+                        return True
+            return False
+
+        current_files = set()
+        for file_path in repo_path_obj.rglob("*"):
+            if file_path.is_file() and not file_path.name.startswith('.'):
+                # Check if file has an indexed extension
+                ext = file_path.suffix.lower()
+                if ext not in settings.included_extensions:
+                    continue
+                # Convert to relative path (matching how CocoIndex stores filenames)
+                try:
+                    relative_path = file_path.relative_to(repo_path_obj)
+                except ValueError:
+                    # File is not relative to repo_path
+                    continue
+                # Check if file matches excluded patterns
+                if is_excluded(relative_path):
+                    continue
+                current_files.add(str(relative_path))
+
+        # Check for added or removed files
+        if stored_files != current_files:
+            added = current_files - stored_files
+            removed = stored_files - current_files
+            if added:
+                logger.debug(f"New files detected: {list(added)[:5]}...")
+            if removed:
+                logger.debug(f"Removed files detected: {list(removed)[:5]}...")
+            return True
+
+        # Check file modification times vs last index time
+        repo = self._repo_manager.get_repo(repo_name)
+        if repo and repo.last_indexed:
+            last_indexed_ts = repo.last_indexed.timestamp()
+            for relative_path in current_files:
+                file_path = repo_path_obj / relative_path
+                try:
+                    mtime = file_path.stat().st_mtime
+                    if mtime > last_indexed_ts:
+                        logger.debug(f"Modified file detected: {relative_path}")
+                        return True
+                except OSError:
+                    # File might have been deleted, trigger re-index
+                    return True
+
+        return False
+
+    def _verify_index_data_exists(self, repo_name: str) -> bool:
+        """Verify that indexed data actually exists in the database.
+        
+        This is a diagnostic check to ensure flow operations persisted correctly.
+        Returns True if chunks table exists and has data, False otherwise.
+        """
+        from src.storage.postgres import get_connection
+        
+        try:
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    flow_name = f"codeindex_{repo_name}".lower()
+                    target_name = f"{repo_name}_chunks".lower()
+                    chunks_table = f"{flow_name}__{target_name}"
+                    
+                    cur.execute("""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_name = %s
+                        )
+                    """, (chunks_table,))
+                    table_exists = cur.fetchone()[0]
+                    
+                    if not table_exists:
+                        logger.warning(f"Chunks table does not exist: {chunks_table}")
+                        return False
+                    
+                    cur.execute(f"SELECT COUNT(*) FROM {chunks_table}")
+                    chunk_count = cur.fetchone()[0]
+                    
+                    if chunk_count == 0:
+                        logger.warning(f"Chunks table exists but has no data: {chunks_table}")
+                        return False
+                    
+                    logger.debug(f"Verified {chunk_count} chunks in {chunks_table}")
+                    return True
+                    
+        except Exception as e:
+            logger.error(f"Error verifying index data for {repo_name}: {e}")
+            return False
+
+    def ensure_indexed(self, path: str) -> IndexResult:
+        """Ensure a codebase is indexed, creating or updating as needed.
+
+        Args:
+            path: Path to the codebase directory
+
+        Returns:
+            IndexResult with status and statistics
+
+        Raises:
+            PathError: If path is invalid
+            IndexingError: If indexing fails
+        """
+        resolved_path = self._validate_path(path)
+        repo_name = self.path_to_repo_name(str(resolved_path))
+        repo_path = str(resolved_path)
+
+        repo = self._repo_manager.get_repo(repo_name)
+
+        # Already indexed - check if files changed before incremental update
+        if repo and repo.status == "ready" and repo.path == repo_path:
+            if self._has_files_changed(repo_name, repo_path):
+                logger.debug(f"Files changed for {repo_name}, running incremental update")
+                return self._incremental_update(repo_name, repo_path)
+            else:
+                logger.debug(f"No files changed for {repo_name}, skipping update")
+                file_count, chunk_count = self._get_stats(repo_name)
+                return IndexResult(
+                    repo_name=repo_name,
+                    status="unchanged",
+                    file_count=file_count,
+                    chunk_count=chunk_count,
+                )
+
+        # Path changed - re-index
+        if repo and repo.path != repo_path:
+            logger.info(f"Path changed for {repo_name}, re-indexing")
+
+        # New or needs re-indexing
+        return self._full_index(repo_name, repo_path)
+
+    def _delete_index(self, repo_name: str) -> None:
+        """Delete an existing index by dropping database tables.
+
+        Note: We don't call flow.drop() because it corrupts the cached flow.
+        Instead, we just drop the database tables directly. CocoIndex will
+        recreate them on the next setup()/update() call.
+        """
+        from src.storage.postgres import get_connection
+
+        # CocoIndex table names
+        flow_name = f"codeindex_{repo_name}".lower()
+        target_name = f"{repo_name}_chunks".lower()
+        chunks_table = f"{flow_name}__{target_name}"
+        tracking_table = f"{flow_name}__cocoindex_tracking"
+
+        try:
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"DROP TABLE IF EXISTS {chunks_table} CASCADE")
+                    cur.execute(f"DROP TABLE IF EXISTS {tracking_table} CASCADE")
+                    cur.execute("DELETE FROM repos WHERE name = %s", (repo_name,))
+                conn.commit()
+            logger.info(f"Deleted index tables for {repo_name}")
+        except Exception as e:
+            logger.warning(f"Could not delete index for {repo_name}: {e}")
+
+    def _incremental_update(self, repo_name: str, repo_path: str) -> IndexResult:
+        """Perform incremental update on an existing index."""
+        try:
+            self._init_cocoindex()
+
+            flow = create_indexing_flow(repo_name, repo_path)
+
+            from src.storage.postgres import get_connection
+            with get_connection() as conn:
+                try:
+                    flow.setup()
+                    conn.commit()
+                    logger.debug(f"Committed after setup() for {repo_name}")
+
+                    flow.update()
+                    conn.commit()
+                    logger.debug(f"Committed after update() for {repo_name}")
+                except Exception:
+                    conn.rollback()
+                    raise
+
+            file_count, chunk_count = self._get_stats(repo_name)
+
+            if not self._verify_index_data_exists(repo_name):
+                logger.warning(f"Index verification failed for {repo_name}: no data found after incremental update")
+
+            self._repo_manager.update_status(
+                repo_name, "ready",
+                file_count=file_count,
+                chunk_count=chunk_count
+            )
+
+            logger.debug(f"Incremental update for {repo_name}: {file_count} files, {chunk_count} chunks")
+
+            return IndexResult(
+                repo_name=repo_name,
+                status="updated",
+                file_count=file_count,
+                chunk_count=chunk_count,
+            )
+
+        except Exception as e:
+            logger.warning(f"Incremental update failed for {repo_name}: {e}")
+            file_count, chunk_count = self._get_stats(repo_name)
+            return IndexResult(
+                repo_name=repo_name,
+                status="unchanged",
+                file_count=file_count,
+                chunk_count=chunk_count,
+                message=f"Using existing index (update failed: {e})",
+            )
+
+    def _full_index(self, repo_name: str, repo_path: str) -> IndexResult:
+        """Perform full indexing of a codebase."""
+        self._repo_manager.register_repo(repo_name, repo_path)
+        self._repo_manager.update_status(repo_name, "indexing")
+
+        try:
+            self._init_cocoindex()
+
+            logger.info(f"Indexing {repo_name} from {repo_path}")
+
+            flow = create_indexing_flow(repo_name, repo_path)
+
+            try:
+                flow.drop()
+            except Exception as e:
+                logger.debug(f"No existing flow to drop: {e}")
+
+            from src.storage.postgres import get_connection
+            with get_connection() as conn:
+                try:
+                    flow.setup()
+                    conn.commit()
+                    logger.debug(f"Committed after setup() for {repo_name}")
+
+                    flow.update()
+                    conn.commit()
+                    logger.debug(f"Committed after update() for {repo_name}")
+                except Exception:
+                    conn.rollback()
+                    raise
+
+            file_count, chunk_count = self._get_stats(repo_name)
+
+            if not self._verify_index_data_exists(repo_name):
+                logger.warning(f"Index verification failed for {repo_name}: no data found after indexing")
+
+            self._repo_manager.update_status(
+                repo_name, "ready",
+                file_count=file_count,
+                chunk_count=chunk_count
+            )
+
+            logger.info(f"Indexed {repo_name}: {file_count} files, {chunk_count} chunks")
+
+            return IndexResult(
+                repo_name=repo_name,
+                status="created",
+                file_count=file_count,
+                chunk_count=chunk_count,
+            )
+
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Indexing failed for {repo_name}: {error_msg}")
+            self._repo_manager.update_status(repo_name, "error", error_message=error_msg)
+            raise IndexingError(f"Failed to index {repo_path}: {error_msg}") from e
+
+
+# Singleton instance
+_indexer: IndexerService | None = None
+_indexer_lock = threading.Lock()
+
+
+def get_indexer() -> IndexerService:
+    """Get the singleton IndexerService instance."""
+    global _indexer
+    if _indexer is None:
+        with _indexer_lock:
+            if _indexer is None:
+                _indexer = IndexerService()
+    return _indexer
