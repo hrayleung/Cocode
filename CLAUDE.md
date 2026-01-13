@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Cocode is an MCP (Model Context Protocol) server that provides semantic code search with hybrid vector + keyword search. It automatically indexes codebases on first use and employs Reciprocal Rank Fusion (RRF) with optional Cohere reranking.
+Cocode is an MCP (Model Context Protocol) server providing semantic code search with hybrid vector + keyword search. Automatic indexing on first use with Reciprocal Rank Fusion (RRF) and optional Cohere reranking.
 
 ## Development Commands
 
@@ -14,103 +14,91 @@ pip install -e ".[dev]"
 
 # Run the MCP server
 cocode
-# or
 python -m src.server
 
 # Run tests
 pytest
 pytest -v
+pytest tests/test_file_categorizer.py -v     # Single test file
+pytest tests/test_file_categorizer.py::test_name -v  # Single test
 ```
 
 ## Architecture
 
-### Core Services
+### Entry Point
 
-**IndexerService** (`src/indexer/service.py`) - Singleton that manages codebase indexing:
-- Transparently handles first-time and incremental indexing
-- Tracks repositories in PostgreSQL via `RepoManager`
-- Uses CocoIndex flow for embeddings and chunking
+`src/server.py` - FastMCP server exposing two tools:
+- `codebase_retrieval(query, path, top_k)` - Main search tool
+- `clear_index(path)` - Delete index for re-indexing
 
-**SearchService** (`src/retrieval/service.py`) - Main search orchestration:
-- Calls `hybrid_search()` combining vector and BM25 results
-- Applies file category boosting and graph expansion
-- Returns tiered results (few full code excerpts, remaining as compact references)
+### Core Services (Singletons)
+
+**IndexerService** (`src/indexer/service.py`):
+- `ensure_indexed()` - Transparent first-time/incremental indexing
+- `resolve_repo_name()` - Handles name collisions via hash suffixes
+- Uses CocoIndex flows (`src/indexer/flow.py`) for chunking and embeddings
+
+**SearchService** (`src/retrieval/service.py`):
+- Orchestrates hybrid search pipeline
+- Returns tiered results (top-k full excerpts, rest as compact references)
 
 ### Search Pipeline
 
 ```
-Query → [Parallel]
-       ├─ Vector Search (pgvector similarity via pgvector extension)
-       └─ BM25 Search (PostgreSQL FTS, auto-detects ParadeDB/Tiger Data)
+Query → get_query_embedding() [Jina if available, else OpenAI]
          ↓
-Reciprocal Rank Fusion (RRF) with configurable weights
+       [Parallel ThreadPoolExecutor]
+       ├─ vector_search() (pgvector cosine similarity)
+       └─ bm25_search() (PostgreSQL FTS)
          ↓
-Optional Cohere Reranking (if COHERE_API_KEY set)
+       reciprocal_rank_fusion() [weights: vector=0.6, bm25=0.4]
          ↓
-File Category Boosting (implementation > docs > config > test)
+       apply_category_boosting() [BEFORE reranking - critical]
          ↓
-Graph Expansion (adds related files via import/export parsing)
+       rerank_results() [Cohere, if COHERE_API_KEY set]
+         ↓
+       expand_with_graph() [adds related files via import parsing]
 ```
 
-### Database Schema
+### Database Tables
 
-- **`repos` table**: Tracked repositories (path, status, file_count, chunk_count)
-- Per-repo chunk tables: `{repo_name}_chunks` with `embedding` (vector), `content_tsv` (tsvector)
-- HNSW vector index + GIN index for FTS
-- Requires pgvector extension and code-aware text search configuration
+- `repos` - Repository registry (path, status, file_count, chunk_count)
+- `codeindex_{repo}__{repo}_chunks` - Per-repo chunk data with:
+  - `embedding` (pgvector) + HNSW index
+  - `content_tsv` (tsvector) + GIN index
 
-### Key Configuration Patterns
+### Embedding Strategies
 
-**Embeddings prepended with context** (Anthropic's Contextual Retrieval approach):
+**OpenAI** (default): Chunks prepended with contextual header:
 ```
 # File: {filename}
 # Language: {language}
 # Location: {location}
-
-{content}
 ```
 
-**Late Chunking** (Jina): When `JINA_API_KEY` is set, embeddings use late chunking where individual chunk embeddings are extracted from full document embedding, preserving cross-chunk context.
+**Jina Late Chunking** (if `JINA_API_KEY` set): Full document embeddings with chunk extraction, preserving cross-chunk context (~24% retrieval improvement).
 
-**File Category Weights** (configurable via env vars):
-- `IMPLEMENTATION_WEIGHT=1.0` (highest)
+### File Category Weights
+
+Applied before reranking to prioritize implementation code:
+- `IMPLEMENTATION_WEIGHT=1.0`
 - `DOCUMENTATION_WEIGHT=0.7`
 - `CONFIG_WEIGHT=0.6`
-- `TEST_WEIGHT=0.5` (lowest)
-
-### Module Relationships
-
-```
-storage/postgres.py  ── Connection pooling (2-10 connections)
-       ↓
-storage/schema.py    ── DB tables & migrations
-       ↓
-indexer/service.py   ── IndexerService, uses CocoIndex flows
-       ↓
-retrieval/service.py ── SearchService, orchestrates search
-       ↓
-retrieval/hybrid.py  ── Combines vector_search.py + bm25_search.py via RRF
-```
-
-### Supported Languages
-
-Code: `.py`, `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`, `.java`, `.cpp`, `.c`, `.h`, `.hpp`, `.rb`, `.php`, `.swift`, `.kt`, `.scala`
-Documentation: `.md`, `.mdx` (architecture understanding only)
-
-Import graph expansion supports Python, TypeScript, JavaScript, Go, Rust.
+- `TEST_WEIGHT=0.3`
 
 ## Environment Variables
 
-Required:
-- `COCOINDEX_DATABASE_URL` - PostgreSQL connection (default: `postgresql://localhost:5432/cocode`)
-- `OPENAI_API_KEY` - For embeddings
+Required (one of):
+- `OPENAI_API_KEY` - For OpenAI embeddings
+- `JINA_API_KEY` + `USE_LATE_CHUNKING=true` - For Jina late chunking
+
+Database:
+- `COCOINDEX_DATABASE_URL` - PostgreSQL with pgvector (default: `postgresql://localhost:5432/cocode`)
 
 Optional:
-- `JINA_API_KEY` - Enables late chunking
-- `COHERE_API_KEY` - Enables reranking
+- `COHERE_API_KEY` - Enables reranking with `rerank-v3.5`
 - `EMBEDDING_MODEL` - Default: `text-embedding-3-large`
 - `CHUNK_SIZE`, `CHUNK_OVERLAP` - Default: 2000/400
-- `VECTOR_WEIGHT`, `BM25_WEIGHT` - RRF weights, default both 0.5
-- `*_WEIGHT` - File category boost weights
+- `VECTOR_WEIGHT`, `BM25_WEIGHT` - RRF weights (default: 0.6/0.4)
 
 See `.env.example` for complete configuration.

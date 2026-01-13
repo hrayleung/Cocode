@@ -12,6 +12,7 @@ from config.settings import settings
 from src.exceptions import IndexingError, PathError
 from src.indexer.flow import create_indexing_flow
 from src.indexer.repo_manager import RepoManager
+from src.retrieval.centrality import compute_and_store_centrality, delete_centrality_table
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,56 @@ class IndexerService:
         chunk_count = self._repo_manager.get_chunk_count(repo_name)
         return file_count, chunk_count
 
+    def _compute_centrality(self, repo_name: str) -> None:
+        """Compute and store centrality scores, logging any failures."""
+        try:
+            compute_and_store_centrality(repo_name)
+        except Exception as e:
+            logger.warning(f"Centrality computation failed for {repo_name}: {e}")
+
+    def _get_indexed_files(self, repo_name: str, repo_path: Path) -> tuple[set[str], set[str]]:
+        """Get indexed files from DB and current files on disk.
+
+        Returns:
+            Tuple of (stored_files, current_files) as relative path strings
+        """
+        import fnmatch
+        from src.storage.postgres import get_connection
+
+        table_name = self._repo_manager._get_table_name(repo_name)
+
+        # Get stored files from DB
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT DISTINCT filename FROM {table_name}")
+                stored_files = {row[0] for row in cur.fetchall()}
+
+        # Get current files on disk
+        def is_excluded(file_path: Path) -> bool:
+            """Check if a file path matches any excluded pattern."""
+            for part in file_path.parts:
+                for pattern in settings.excluded_patterns:
+                    if fnmatch.fnmatch(part, pattern):
+                        return True
+            return False
+
+        current_files = set()
+        for file_path in repo_path.rglob("*"):
+            if not (file_path.is_file() and
+                    not file_path.name.startswith('.') and
+                    file_path.suffix.lower() in settings.included_extensions):
+                continue
+
+            try:
+                relative_path = file_path.relative_to(repo_path)
+            except ValueError:
+                continue
+
+            if not is_excluded(relative_path):
+                current_files.add(str(relative_path))
+
+        return stored_files, current_files
+
     def _has_files_changed(self, repo_name: str, repo_path: str) -> bool:
         """Check if any indexed files have changed.
 
@@ -142,52 +193,8 @@ class IndexerService:
         1. Set of indexed files vs current files on disk
         2. File modification times vs last index time
         """
-        import fnmatch
-        from pathlib import Path
-
-        table_name = self._repo_manager._get_table_name(repo_name)
         repo_path_obj = Path(repo_path)
-
-        from src.storage.postgres import get_connection
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                # Get distinct filenames from indexed chunks
-                cur.execute(f"""
-                    SELECT DISTINCT filename
-                    FROM {table_name}
-                """)
-                stored_files = {row[0] for row in cur.fetchall()}
-
-        # Get current files on disk (relative to repo_path)
-        from config.settings import settings
-
-        def is_excluded(file_path: Path) -> bool:
-            """Check if a file path matches any excluded pattern."""
-            # Check each path component against excluded patterns
-            for part in file_path.parts:
-                for pattern in settings.excluded_patterns:
-                    # Handle glob-style patterns (e.g., ".*" for dotfiles)
-                    if fnmatch.fnmatch(part, pattern):
-                        return True
-            return False
-
-        current_files = set()
-        for file_path in repo_path_obj.rglob("*"):
-            if file_path.is_file() and not file_path.name.startswith('.'):
-                # Check if file has an indexed extension
-                ext = file_path.suffix.lower()
-                if ext not in settings.included_extensions:
-                    continue
-                # Convert to relative path (matching how CocoIndex stores filenames)
-                try:
-                    relative_path = file_path.relative_to(repo_path_obj)
-                except ValueError:
-                    # File is not relative to repo_path
-                    continue
-                # Check if file matches excluded patterns
-                if is_excluded(relative_path):
-                    continue
-                current_files.add(str(relative_path))
+        stored_files, current_files = self._get_indexed_files(repo_name, repo_path_obj)
 
         # Check for added or removed files
         if stored_files != current_files:
@@ -206,8 +213,7 @@ class IndexerService:
             for relative_path in current_files:
                 file_path = repo_path_obj / relative_path
                 try:
-                    mtime = file_path.stat().st_mtime
-                    if mtime > last_indexed_ts:
+                    if file_path.stat().st_mtime > last_indexed_ts:
                         logger.debug(f"Modified file detected: {relative_path}")
                         return True
                 except OSError:
@@ -218,41 +224,39 @@ class IndexerService:
 
     def _verify_index_data_exists(self, repo_name: str) -> bool:
         """Verify that indexed data actually exists in the database.
-        
+
         This is a diagnostic check to ensure flow operations persisted correctly.
         Returns True if chunks table exists and has data, False otherwise.
         """
         from src.storage.postgres import get_connection
-        
+
         try:
+            chunks_table = f"codeindex_{repo_name.lower()}__{repo_name.lower()}_chunks"
+
             with get_connection() as conn:
                 with conn.cursor() as cur:
-                    flow_name = f"codeindex_{repo_name}".lower()
-                    target_name = f"{repo_name}_chunks".lower()
-                    chunks_table = f"{flow_name}__{target_name}"
-                    
+                    # Check if table exists and has data
                     cur.execute("""
                         SELECT EXISTS (
-                            SELECT FROM information_schema.tables 
+                            SELECT FROM information_schema.tables
                             WHERE table_name = %s
                         )
                     """, (chunks_table,))
-                    table_exists = cur.fetchone()[0]
-                    
-                    if not table_exists:
+
+                    if not cur.fetchone()[0]:
                         logger.warning(f"Chunks table does not exist: {chunks_table}")
                         return False
-                    
+
                     cur.execute(f"SELECT COUNT(*) FROM {chunks_table}")
                     chunk_count = cur.fetchone()[0]
-                    
+
                     if chunk_count == 0:
                         logger.warning(f"Chunks table exists but has no data: {chunks_table}")
                         return False
-                    
+
                     logger.debug(f"Verified {chunk_count} chunks in {chunks_table}")
                     return True
-                    
+
         except Exception as e:
             logger.error(f"Error verifying index data for {repo_name}: {e}")
             return False
@@ -324,6 +328,9 @@ class IndexerService:
         except Exception as e:
             logger.warning(f"Could not delete index for {repo_name}: {e}")
 
+        # Also delete centrality table
+        delete_centrality_table(repo_name)
+
     def _incremental_update(self, repo_name: str, repo_path: str) -> IndexResult:
         """Perform incremental update on an existing index."""
         try:
@@ -355,6 +362,8 @@ class IndexerService:
                 file_count=file_count,
                 chunk_count=chunk_count
             )
+
+            self._compute_centrality(repo_name)
 
             logger.debug(f"Incremental update for {repo_name}: {file_count} files, {chunk_count} chunks")
 
@@ -417,6 +426,8 @@ class IndexerService:
                 file_count=file_count,
                 chunk_count=chunk_count
             )
+
+            self._compute_centrality(repo_name)
 
             logger.info(f"Indexed {repo_name}: {file_count} files, {chunk_count} chunks")
 

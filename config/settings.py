@@ -11,11 +11,18 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-def _get_int_env(key: str, default: int, min_val: int = 0) -> int:
-    """Safely get integer from environment variable with validation."""
+from typing import TypeVar
+
+T = TypeVar('T', int, float)
+
+def _get_numeric_env(key: str, default: T, min_val: T = 0, conv_func=None) -> T:
+    """Safely get numeric value from environment variable with validation."""
+    if conv_func is None:
+        conv_func = type(default)
+
     value = os.getenv(key, str(default))
     try:
-        result = int(value)
+        result = conv_func(value)
         if result < min_val:
             logger.warning(f"{key}={value} below minimum {min_val}, using {min_val}")
             return min_val
@@ -24,19 +31,13 @@ def _get_int_env(key: str, default: int, min_val: int = 0) -> int:
         logger.error(f"Invalid {key}={value}, using default {default}")
         return default
 
+def _get_int_env(key: str, default: int, min_val: int = 0) -> int:
+    """Safely get integer from environment variable with validation."""
+    return _get_numeric_env(key, default, min_val, int)
 
 def _get_float_env(key: str, default: float, min_val: float = 0.0) -> float:
     """Safely get float from environment variable with validation."""
-    value = os.getenv(key, str(default))
-    try:
-        result = float(value)
-        if result < min_val:
-            logger.warning(f"{key}={value} below minimum {min_val}, using {min_val}")
-            return min_val
-        return result
-    except ValueError:
-        logger.error(f"Invalid {key}={value}, using default {default}")
-        return default
+    return _get_numeric_env(key, default, min_val, float)
 
 
 @dataclass
@@ -131,6 +132,12 @@ class Settings:
     # Result diversity (MMR algorithm)
     diversity_lambda: float = field(
         default_factory=lambda: _get_float_env("DIVERSITY_LAMBDA", 0.6, min_val=0.0)
+    )
+
+    # Centrality boosting (graph-based importance)
+    # 1.0 = full effect, 0 = disabled, >1 = amplified
+    centrality_weight: float = field(
+        default_factory=lambda: _get_float_env("CENTRALITY_WEIGHT", 1.0, min_val=0.0)
     )
 
     # File patterns - code + docs
