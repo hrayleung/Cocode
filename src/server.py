@@ -175,13 +175,13 @@ def main():
         logger.error(f"Failed to initialize database: {e}")
         sys.exit(1)
 
-    def signal_handler(sig, frame):
+    def shutdown(sig, frame):
         logger.info(f"Received signal {sig}, shutting down...")
         close_pool()
         sys.exit(0)
 
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, lambda s, f: signal_handler(s, f))
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
 
     try:
         mcp.run()

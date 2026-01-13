@@ -222,22 +222,25 @@ def create_indexing_flow(
     flow_name = f"CodeIndex_{repo_name}"
 
     if included_patterns is None:
-        # Use **/* glob pattern to match files recursively in subdirectories
         included_patterns = [f"**/*{ext}" for ext in settings.included_extensions]
     if excluded_patterns is None:
         excluded_patterns = settings.excluded_patterns
-    included_patterns_key = tuple(included_patterns)
-    excluded_patterns_key = tuple(excluded_patterns)
 
+    included_key = tuple(included_patterns)
+    excluded_key = tuple(excluded_patterns)
+
+    # Check cache for existing flow with matching configuration
     cached = _flow_cache.get(flow_name)
     if cached:
-        if (
+        cache_matches = (
             cached.repo_path == repo_path
-            and cached.included_patterns == included_patterns_key
-            and cached.excluded_patterns == excluded_patterns_key
-        ):
+            and cached.included_patterns == included_key
+            and cached.excluded_patterns == excluded_key
+        )
+        if cache_matches:
             return cached.flow
 
+        # Configuration changed - close old flow before creating new one
         try:
             cached.flow.close()
         except Exception as e:
@@ -327,8 +330,8 @@ def create_indexing_flow(
     _flow_cache[flow_name] = CachedFlow(
         flow=flow,
         repo_path=repo_path,
-        included_patterns=included_patterns_key,
-        excluded_patterns=excluded_patterns_key,
+        included_patterns=included_key,
+        excluded_patterns=excluded_key,
     )
     return flow
 

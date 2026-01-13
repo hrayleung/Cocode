@@ -92,23 +92,27 @@ class IndexerService:
                 logger.debug(f"Could not lookup repo '{name}': {e}")
                 return None
 
-        # Prefer an exact path match when we already know this repo.
+        # Check if base name is already registered for this exact path
         existing_base = get_repo_safe(base)
-        if existing_base is None or existing_base.path == resolved_str:
+        if existing_base is not None and existing_base.path == resolved_str:
             return base
 
-        # Base name is taken by a different path: use a hashed variant.
+        # Check if a hashed variant is already registered for this path
         digest = hashlib.sha1(resolved_str.encode("utf-8")).hexdigest()
-
-        # Try increasing hash prefix lengths until we find a unique name
         for prefix_len in (8, 12, 16, 40):
             hashed = f"{base}_{digest[:prefix_len]}"
             existing_hashed = get_repo_safe(hashed)
-            if existing_hashed is None:
-                # Name is available
+            if existing_hashed is not None and existing_hashed.path == resolved_str:
                 return hashed
-            if existing_hashed.path == resolved_str:
-                # Found existing entry for this exact path
+
+        # No existing registration found - use base if available
+        if existing_base is None:
+            return base
+
+        # Base name is taken by a different path: find an available hashed variant
+        for prefix_len in (8, 12, 16, 40):
+            hashed = f"{base}_{digest[:prefix_len]}"
+            if get_repo_safe(hashed) is None:
                 return hashed
 
         # Fallback: full hash (should never happen in practice)

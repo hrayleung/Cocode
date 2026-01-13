@@ -142,25 +142,20 @@ def add_code_fts_to_table(table_name: str) -> bool:
                     """)
                     has_normalize_func = cur.fetchone() is not None
 
+                    # Build tsvector expression based on available functions
                     if has_normalize_func:
-                        # Use code-aware tsvector
-                        cur.execute(f"""
-                            ALTER TABLE {table_name}
-                            ADD COLUMN content_tsv tsvector
-                            GENERATED ALWAYS AS (
-                                to_tsvector('english', coalesce(content, '')) ||
-                                to_tsvector('simple', coalesce(normalize_code_text(content), ''))
-                            ) STORED
-                        """)
+                        tsvector_expr = """
+                            to_tsvector('english', coalesce(content, '')) ||
+                            to_tsvector('simple', coalesce(normalize_code_text(content), ''))
+                        """
                     else:
-                        # Fall back to standard English tsvector
-                        cur.execute(f"""
-                            ALTER TABLE {table_name}
-                            ADD COLUMN content_tsv tsvector
-                            GENERATED ALWAYS AS (
-                                to_tsvector('english', coalesce(content, ''))
-                            ) STORED
-                        """)
+                        tsvector_expr = "to_tsvector('english', coalesce(content, ''))"
+
+                    cur.execute(f"""
+                        ALTER TABLE {table_name}
+                        ADD COLUMN content_tsv tsvector
+                        GENERATED ALWAYS AS ({tsvector_expr}) STORED
+                    """)
 
                 # Create GIN index
                 index_name = f"idx_{table_name.replace('.', '_')}_content_tsv"

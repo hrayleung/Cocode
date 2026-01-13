@@ -103,6 +103,19 @@ def detect_backend() -> BM25Backend:
     return _available_backend
 
 
+def _rows_to_results(rows: list[tuple]) -> list[SearchResult]:
+    """Convert database rows to SearchResult objects."""
+    return [
+        SearchResult(
+            filename=row[0],
+            location=str(row[1]) if row[1] else "",
+            content=row[2],
+            score=float(row[3]) if row[3] else 0.0,
+        )
+        for row in rows
+    ]
+
+
 def _search_pg_search(
     table_name: str,
     query: str,
@@ -116,7 +129,6 @@ def _search_pg_search(
     if not tokens:
         return []
 
-    # Build pg_search query - uses @@@ operator
     search_query = " ".join(tokens)
 
     with get_connection() as conn:
@@ -127,31 +139,19 @@ def _search_pg_search(
                 WHERE tablename = %s AND indexdef LIKE '%USING bm25%'
             """, (table_name,))
 
-            if cur.fetchone():
-                # Use BM25 index with pg_search
-                cur.execute(f"""
-                    SELECT filename, location, content,
-                           paradedb.score(id) AS score
-                    FROM {table_name}
-                    WHERE content @@@ %s
-                    ORDER BY score DESC
-                    LIMIT %s
-                """, (search_query, top_k))
-            else:
-                # Fall back to native FTS if no BM25 index
+            if not cur.fetchone():
                 return _search_native_fts(table_name, query, tokens, top_k)
 
-            rows = cur.fetchall()
+            cur.execute(f"""
+                SELECT filename, location, content,
+                       paradedb.score(id) AS score
+                FROM {table_name}
+                WHERE content @@@ %s
+                ORDER BY score DESC
+                LIMIT %s
+            """, (search_query, top_k))
 
-    return [
-        SearchResult(
-            filename=row[0],
-            location=str(row[1]) if row[1] else "",
-            content=row[2],
-            score=float(row[3]) if row[3] else 0.0,
-        )
-        for row in rows
-    ]
+            return _rows_to_results(cur.fetchall())
 
 
 def _search_pg_textsearch(
@@ -178,30 +178,20 @@ def _search_pg_textsearch(
                 WHERE tablename = %s AND indexdef LIKE '%USING bm25%'
             """, (table_name,))
 
-            if cur.fetchone():
-                # Use pg_textsearch <@> operator
-                # Lower scores = better matches (distance metric)
-                cur.execute(f"""
-                    SELECT filename, location, content,
-                           -(content <@> %s) AS score
-                    FROM {table_name}
-                    ORDER BY content <@> %s
-                    LIMIT %s
-                """, (search_query, search_query, top_k))
-            else:
+            if not cur.fetchone():
                 return _search_native_fts(table_name, query, tokens, top_k)
 
-            rows = cur.fetchall()
+            # Use pg_textsearch <@> operator
+            # Lower scores = better matches (distance metric)
+            cur.execute(f"""
+                SELECT filename, location, content,
+                       -(content <@> %s) AS score
+                FROM {table_name}
+                ORDER BY content <@> %s
+                LIMIT %s
+            """, (search_query, search_query, top_k))
 
-    return [
-        SearchResult(
-            filename=row[0],
-            location=str(row[1]) if row[1] else "",
-            content=row[2],
-            score=float(row[3]) if row[3] else 0.0,
-        )
-        for row in rows
-    ]
+            return _rows_to_results(cur.fetchall())
 
 
 def _search_native_fts(
@@ -225,7 +215,6 @@ def _search_native_fts(
     if config is None:
         config = BM25Config()
 
-    # Check if content_tsv column exists, if not use to_tsvector on content
     with get_connection() as conn:
         with conn.cursor() as cur:
             # Check for tsvector column
@@ -235,34 +224,20 @@ def _search_native_fts(
             """, (table_name,))
             has_tsv_column = cur.fetchone() is not None
 
-            # Build the tsquery using websearch_to_tsquery for better parsing
-            # This handles phrases, operators, and partial matches
-            tsquery_sql = "websearch_to_tsquery('english', %s)"
+            tsvector_expr = "content_tsv" if has_tsv_column else "to_tsvector('english', content)"
 
-            # Build the tsvector expression
-            if has_tsv_column:
-                tsvector_expr = "content_tsv"
-            else:
-                tsvector_expr = "to_tsvector('english', content)"
-
-            # Use ts_rank_cd which considers cover density (term proximity)
-            # Normalization options:
-            #   0: ignore document length
-            #   1: divide by 1 + log(length)
-            #   2: divide by length
-            #   4: divide by mean harmonic distance
-            #   8: divide by unique word count
-            #  16: divide by 1 + log(unique words)
-            #  32: divide by itself + 1 (scale to 0-1)
-            # We use 1|4|32 = 37 for good BM25-like behavior
+            # Normalization: 1|4|32 = 37 for BM25-like behavior
+            # 1: divide by 1 + log(length)
+            # 4: divide by mean harmonic distance
+            # 32: divide by itself + 1 (scale to 0-1)
             normalization = 37
 
-            # First try with OR logic for better recall, then rank by relevance
+            # Use OR logic for better recall, then rank by relevance
             search_text = " OR ".join(tokens)
 
             cur.execute(f"""
                 WITH query AS (
-                    SELECT {tsquery_sql} AS q
+                    SELECT websearch_to_tsquery('english', %s) AS q
                 )
                 SELECT filename, location, content,
                        ts_rank_cd({tsvector_expr}, query.q, {normalization}) AS score
@@ -274,20 +249,11 @@ def _search_native_fts(
 
             rows = cur.fetchall()
 
-            # If no results with tsvector, try hybrid approach
+            # Fall back to ILIKE if tsvector doesn't match
             if not rows:
-                # Fall back to ILIKE with tf-idf style ranking
                 rows = _search_keyword_fallback(cur, table_name, tokens, top_k)
 
-    return [
-        SearchResult(
-            filename=row[0],
-            location=str(row[1]) if row[1] else "",
-            content=row[2],
-            score=float(row[3]) if row[3] else 0.0,
-        )
-        for row in rows
-    ]
+    return _rows_to_results(rows)
 
 
 def _search_keyword_fallback(
