@@ -21,41 +21,28 @@ class SearchResult:
     score: float
 
 
-def sanitize_table_name(name: str) -> str:
+def sanitize_identifier(name: str) -> str:
     """Sanitize a name for safe use as a PostgreSQL identifier.
 
     Uses a whitelist approach - only allows lowercase alphanumeric and underscore.
     Raises ValueError if the name is empty after sanitization.
-
-    Note: Does NOT add prefixes to preserve backward compatibility with existing
-    indexes. PostgreSQL handles numeric-starting identifiers in table names.
     """
-    # Lowercase and replace common separators with underscores
     sanitized = name.lower()
     sanitized = re.sub(r'[-. ]+', '_', sanitized)
-    # Remove any remaining invalid characters (whitelist approach)
     sanitized = re.sub(r'[^a-z0-9_]', '', sanitized)
-    # Remove leading/trailing underscores
     sanitized = sanitized.strip('_')
-    # Validate we have something left
     if not sanitized:
-        raise ValueError(f"Invalid table name after sanitization: {name!r}")
+        raise ValueError(f"Invalid identifier after sanitization: {name!r}")
     return sanitized
 
 
-def get_table_name(repo_name: str) -> str:
-    """Get the CocoIndex table name for a repository.
+def get_chunks_table_name(repo_name: str) -> str:
+    """Get the CocoIndex chunks table name for a repository.
 
-    Sanitizes the repo_name to prevent SQL injection.
+    Table name format: codeindex_{repo}__{repo}_chunks
     """
-    # Sanitize the repo name first
-    safe_name = sanitize_table_name(repo_name)
-    # CocoIndex naming: {flow_name}__{target_name}
-    # Flow name: CodeIndex_{repo_name}
-    # Target name: {repo_name}_chunks
-    flow_name = f"codeindex_{safe_name}"
-    target_name = f"{safe_name}_chunks"
-    return f"{flow_name}__{target_name}"
+    safe_name = sanitize_identifier(repo_name)
+    return f"codeindex_{safe_name}__{safe_name}_chunks"
 
 
 def vector_search(
@@ -94,7 +81,7 @@ def vector_search(
             f"expected {settings.embedding_dimensions}"
         )
 
-    table_name = get_table_name(repo_name)
+    table_name = get_chunks_table_name(repo_name)
 
     with get_connection() as conn:
         with conn.cursor() as cur:

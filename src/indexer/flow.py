@@ -14,9 +14,9 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 
-# Jina embedding executor with late chunking support
 class JinaEmbedSpec(cocoindex.op.FunctionSpec):
     """Spec for Jina embedding function."""
+
     model: str = "jina-embeddings-v3"
     dimensions: int = 1024
     task: str = "retrieval.passage"
@@ -131,15 +131,13 @@ def add_context_header(filename: str, language: str, location: str, content: str
 def use_jina_embeddings() -> bool:
     """Check if Jina embeddings should be used (late chunking enabled).
 
-    Also validates the Jina API key by making a test request.
+    Validates the Jina API key by making a test request.
     Falls back to OpenAI if Jina is not available or fails.
     """
     if not settings.jina_api_key or not settings.use_late_chunking:
         return False
 
-    # Quick validation of the API key
     try:
-        import httpx
         response = httpx.post(
             "https://api.jina.ai/v1/embeddings",
             headers={
@@ -149,20 +147,20 @@ def use_jina_embeddings() -> bool:
             json={
                 "model": settings.jina_model,
                 "input": ["test"],
-                # Use configured dimensions to avoid false negatives if a model
-                # doesn't support arbitrary dimension downsampling.
                 "dimensions": settings.embedding_dimensions,
                 "task": "retrieval.query",
                 "normalized": True,
             },
             timeout=10.0,
         )
+
         if response.status_code == 403:
             logger.warning("Jina API key is invalid (403 Forbidden). Falling back to OpenAI.")
             return False
-        elif response.status_code != 200:
+        if response.status_code != 200:
             logger.warning(f"Jina API returned {response.status_code}. Falling back to OpenAI.")
             return False
+
         return True
     except Exception as e:
         logger.warning(f"Jina API validation failed: {e}. Falling back to OpenAI.")
@@ -232,12 +230,12 @@ def create_indexing_flow(
     # Check cache for existing flow with matching configuration
     cached = _flow_cache.get(flow_name)
     if cached:
-        cache_matches = (
+        config_matches = (
             cached.repo_path == repo_path
             and cached.included_patterns == included_key
             and cached.excluded_patterns == excluded_key
         )
-        if cache_matches:
+        if config_matches:
             return cached.flow
 
         # Configuration changed - close old flow before creating new one

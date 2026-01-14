@@ -174,26 +174,9 @@ def add_code_fts_to_table(table_name: str) -> bool:
 
 
 def setup_fts_for_repo(repo_name: str) -> bool:
-    """Set up full-text search for a repository.
+    """Set up full-text search for a repository."""
+    from .vector_search import get_chunks_table_name
 
-    Ensures:
-    - Code text search configuration exists
-    - Repository table has content_tsv column
-    - GIN index exists on content_tsv
-
-    Args:
-        repo_name: Name of the repository
-
-    Returns:
-        True if successful
-    """
-    from .vector_search import get_table_name
-
-    # First ensure the code text search config exists
     create_code_text_search_config()
-
-    # Get the table name for this repo
-    table_name = get_table_name(repo_name)
-
-    # Add FTS columns and indexes
+    table_name = get_chunks_table_name(repo_name)
     return add_code_fts_to_table(table_name)

@@ -154,7 +154,7 @@ async def clear_index(path: str | None = None) -> dict:
         return {"error": f"Failed to clear index: {e}"}
 
 
-def main():
+def main() -> None:
     """Main entry point for MCP server."""
     logger.info("Starting cocode MCP server...")
 
@@ -175,7 +175,7 @@ def main():
         logger.error(f"Failed to initialize database: {e}")
         sys.exit(1)
 
-    def shutdown(sig, frame):
+    def shutdown(sig, frame) -> None:
         logger.info(f"Received signal {sig}, shutting down...")
         close_pool()
         sys.exit(0)

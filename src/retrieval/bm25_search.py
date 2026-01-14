@@ -19,7 +19,7 @@ from enum import Enum
 from src.storage.postgres import get_connection
 
 from .tokenizer import tokenize_for_search
-from .vector_search import SearchResult, get_table_name
+from .vector_search import SearchResult, get_chunks_table_name
 
 logger = logging.getLogger(__name__)
 
@@ -320,7 +320,7 @@ def ensure_fts_index(repo_name: str) -> bool:
 
 def _ensure_basic_fts_index(repo_name: str) -> bool:
     """Basic FTS index setup as fallback."""
-    table_name = get_table_name(repo_name)
+    table_name = get_chunks_table_name(repo_name)
 
     try:
         with get_connection() as conn:
@@ -381,35 +381,27 @@ def bm25_search(
     if config is None:
         config = BM25Config()
 
-    table_name = get_table_name(repo_name)
+    table_name = get_chunks_table_name(repo_name)
 
     # Tokenize query using code-aware tokenizer
     tokens = tokenize_for_search(query)
-
     if not tokens:
-        # If no tokens after processing, use the raw query words
         tokens = [w.lower() for w in query.split() if len(w) >= 2]
-
     if not tokens:
         return []
 
-    # Ensure FTS index exists
     ensure_fts_index(repo_name)
-
-    # Detect and use the best available backend
     backend = detect_backend()
 
     try:
         if backend == BM25Backend.PG_SEARCH:
             return _search_pg_search(table_name, query, tokens, top_k)
-        elif backend == BM25Backend.PG_TEXTSEARCH:
+        if backend == BM25Backend.PG_TEXTSEARCH:
             return _search_pg_textsearch(table_name, query, tokens, top_k, config)
-        else:
-            return _search_native_fts(table_name, query, tokens, top_k, config)
+        return _search_native_fts(table_name, query, tokens, top_k, config)
 
     except Exception as e:
         logger.warning(f"BM25 search failed with {backend.value}, falling back: {e}")
-        # Always have native FTS as fallback
         try:
             return _search_native_fts(table_name, query, tokens, top_k, config)
         except Exception as e2:
@@ -418,14 +410,8 @@ def bm25_search(
 
 
 def get_corpus_stats(repo_name: str) -> dict:
-    """Get corpus statistics for BM25 scoring.
-
-    Returns statistics like:
-    - Total documents
-    - Average document length
-    - Term frequencies (for IDF calculation)
-    """
-    table_name = get_table_name(repo_name)
+    """Get corpus statistics for BM25 scoring."""
+    table_name = get_chunks_table_name(repo_name)
 
     with get_connection() as conn:
         with conn.cursor() as cur:

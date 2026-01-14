@@ -13,6 +13,7 @@ from src.exceptions import IndexingError, PathError
 from src.indexer.flow import create_indexing_flow
 from src.indexer.repo_manager import RepoManager
 from src.retrieval.centrality import compute_and_store_centrality, delete_centrality_table
+from src.retrieval.vector_search import get_chunks_table_name
 
 logger = logging.getLogger(__name__)
 
@@ -144,15 +145,11 @@ class IndexerService:
             logger.warning(f"Centrality computation failed for {repo_name}: {e}")
 
     def _get_indexed_files(self, repo_name: str, repo_path: Path) -> tuple[set[str], set[str]]:
-        """Get indexed files from DB and current files on disk.
-
-        Returns:
-            Tuple of (stored_files, current_files) as relative path strings
-        """
+        """Get indexed files from DB and current files on disk."""
         import fnmatch
         from src.storage.postgres import get_connection
 
-        table_name = self._repo_manager._get_table_name(repo_name)
+        table_name = get_chunks_table_name(repo_name)
 
         # Get stored files from DB
         with get_connection() as conn:
@@ -208,34 +205,31 @@ class IndexerService:
 
         # Check file modification times vs last index time
         repo = self._repo_manager.get_repo(repo_name)
-        if repo and repo.last_indexed:
-            last_indexed_ts = repo.last_indexed.timestamp()
-            for relative_path in current_files:
-                file_path = repo_path_obj / relative_path
-                try:
-                    if file_path.stat().st_mtime > last_indexed_ts:
-                        logger.debug(f"Modified file detected: {relative_path}")
-                        return True
-                except OSError:
-                    # File might have been deleted, trigger re-index
+        if not (repo and repo.last_indexed):
+            return False
+
+        last_indexed_ts = repo.last_indexed.timestamp()
+        for relative_path in current_files:
+            file_path = repo_path_obj / relative_path
+            try:
+                if file_path.stat().st_mtime > last_indexed_ts:
+                    logger.debug(f"Modified file detected: {relative_path}")
                     return True
+            except OSError:
+                # File might have been deleted, trigger re-index
+                return True
 
         return False
 
     def _verify_index_data_exists(self, repo_name: str) -> bool:
-        """Verify that indexed data actually exists in the database.
-
-        This is a diagnostic check to ensure flow operations persisted correctly.
-        Returns True if chunks table exists and has data, False otherwise.
-        """
+        """Verify that indexed data actually exists in the database."""
         from src.storage.postgres import get_connection
 
-        try:
-            chunks_table = f"codeindex_{repo_name.lower()}__{repo_name.lower()}_chunks"
+        chunks_table = get_chunks_table_name(repo_name)
 
+        try:
             with get_connection() as conn:
                 with conn.cursor() as cur:
-                    # Check if table exists and has data
                     cur.execute("""
                         SELECT EXISTS (
                             SELECT FROM information_schema.tables
@@ -243,7 +237,8 @@ class IndexerService:
                         )
                     """, (chunks_table,))
 
-                    if not cur.fetchone()[0]:
+                    table_exists = cur.fetchone()[0]
+                    if not table_exists:
                         logger.warning(f"Chunks table does not exist: {chunks_table}")
                         return False
 
@@ -303,19 +298,13 @@ class IndexerService:
         return self._full_index(repo_name, repo_path)
 
     def _delete_index(self, repo_name: str) -> None:
-        """Delete an existing index by dropping database tables.
-
-        Note: We don't call flow.drop() because it corrupts the cached flow.
-        Instead, we just drop the database tables directly. CocoIndex will
-        recreate them on the next setup()/update() call.
-        """
+        """Delete an existing index by dropping database tables."""
         from src.storage.postgres import get_connection
+        from src.retrieval.vector_search import sanitize_identifier
 
-        # CocoIndex table names
-        flow_name = f"codeindex_{repo_name}".lower()
-        target_name = f"{repo_name}_chunks".lower()
-        chunks_table = f"{flow_name}__{target_name}"
-        tracking_table = f"{flow_name}__cocoindex_tracking"
+        safe_name = sanitize_identifier(repo_name)
+        chunks_table = get_chunks_table_name(repo_name)
+        tracking_table = f"codeindex_{safe_name}__cocoindex_tracking"
 
         try:
             with get_connection() as conn:
@@ -328,7 +317,6 @@ class IndexerService:
         except Exception as e:
             logger.warning(f"Could not delete index for {repo_name}: {e}")
 
-        # Also delete centrality table
         delete_centrality_table(repo_name)
 
     def _incremental_update(self, repo_name: str, repo_path: str) -> IndexResult:

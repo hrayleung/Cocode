@@ -1,8 +1,9 @@
 """Configuration settings for cocode MCP server."""
 
-import os
 import logging
+import os
 from dataclasses import dataclass, field
+from typing import TypeVar
 
 from dotenv import load_dotenv
 
@@ -10,10 +11,8 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-
-from typing import TypeVar
-
 T = TypeVar('T', int, float)
+
 
 def _get_numeric_env(key: str, default: T, min_val: T = 0, conv_func=None) -> T:
     """Safely get numeric value from environment variable with validation."""

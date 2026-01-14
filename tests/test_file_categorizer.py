@@ -9,7 +9,7 @@ from src.retrieval.file_categorizer import (
 )
 
 
-class TestCategorizeFile:
+class TestFileCategorizerDetection:
     """Tests for categorize_file function."""
 
     # Python test files

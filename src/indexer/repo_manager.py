@@ -7,6 +7,7 @@ from datetime import datetime
 from config.settings import settings
 from src.storage.postgres import get_connection
 from src.storage.schema import get_create_chunks_table_sql, get_create_schema_sql
+from src.retrieval.vector_search import get_chunks_table_name
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +132,7 @@ class RepoManager:
 
     def get_chunk_count(self, name: str) -> int:
         """Get number of indexed chunks for a repository."""
-        table_name = self._get_table_name(name)
+        table_name = get_chunks_table_name(name)
 
         with get_connection() as conn:
             with conn.cursor() as cur:
@@ -144,7 +145,7 @@ class RepoManager:
 
     def get_file_count(self, name: str) -> int:
         """Get number of unique files indexed for a repository."""
-        table_name = self._get_table_name(name)
+        table_name = get_chunks_table_name(name)
 
         with get_connection() as conn:
             with conn.cursor() as cur:
@@ -154,13 +155,6 @@ class RepoManager:
                 except Exception as e:
                     logger.debug(f"Error counting files for {name}: {e}")
                     return 0
-
-    @staticmethod
-    def _get_table_name(name: str) -> str:
-        """Get CocoIndex table name for a repository."""
-        flow_name = f"codeindex_{name}".lower()
-        target_name = f"{name}_chunks".lower()
-        return f"{flow_name}__{target_name}"
 
     @staticmethod
     def _row_to_repo_info(row: tuple) -> RepoInfo:

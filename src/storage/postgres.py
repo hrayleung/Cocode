@@ -3,7 +3,7 @@
 import logging
 import threading
 from contextlib import contextmanager
-from typing import Generator
+from typing import Iterator
 
 from psycopg_pool import ConnectionPool
 
@@ -41,7 +41,7 @@ def close_pool() -> None:
 
 
 @contextmanager
-def get_connection() -> Generator:
+def get_connection() -> Iterator:
     """Get a connection from the pool."""
     pool = get_pool()
     with pool.connection() as conn:

@@ -9,7 +9,7 @@ import logging
 from collections import defaultdict
 
 from src.storage.postgres import get_connection
-from src.retrieval.vector_search import sanitize_table_name
+from src.retrieval.vector_search import sanitize_identifier
 
 logger = logging.getLogger(__name__)
 
@@ -105,8 +105,9 @@ def normalize_scores(
         return {f: mid for f in scores}
 
     # Linear interpolation to target range
+    target_range = max_score - min_score
     return {
-        file: min_score + ((score - raw_min) / raw_range) * (max_score - min_score)
+        file: min_score + ((score - raw_min) / raw_range) * target_range
         for file, score in scores.items()
     }
 
@@ -132,7 +133,7 @@ def compute_centrality_scores(
 
 def _get_centrality_table_name(repo_name: str) -> str:
     """Get sanitized centrality table name for a repository."""
-    return f"{sanitize_table_name(repo_name)}_centrality"
+    return f"{sanitize_identifier(repo_name)}_centrality"
 
 
 def store_centrality_scores(repo_name: str, scores: dict[str, float]) -> None:

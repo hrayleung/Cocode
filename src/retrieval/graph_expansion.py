@@ -160,16 +160,9 @@ def resolve_import_to_file(
 
 
 def get_repo_files(repo_name: str) -> set[str]:
-    """Get all indexed files for a repository.
-
-    Args:
-        repo_name: Repository name
-
-    Returns:
-        Set of file paths
-    """
-    from .vector_search import get_table_name
-    table_name = get_table_name(repo_name)
+    """Get all indexed files for a repository."""
+    from .vector_search import get_chunks_table_name
+    table_name = get_chunks_table_name(repo_name)
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -181,16 +174,9 @@ def get_repo_files(repo_name: str) -> set[str]:
 
 
 def build_import_graph(repo_name: str) -> dict[str, list[str]]:
-    """Build a graph of imports for a repository.
-
-    Args:
-        repo_name: Repository name
-
-    Returns:
-        Dictionary mapping file -> list of files it imports
-    """
-    from .vector_search import get_table_name
-    table_name = get_table_name(repo_name)
+    """Build a graph of imports for a repository."""
+    from .vector_search import get_chunks_table_name
+    table_name = get_chunks_table_name(repo_name)
 
     with get_connection() as conn:
         with conn.cursor(name="graph_expansion_cursor") as cur:
@@ -320,15 +306,11 @@ def expand_results_with_related(
     from src.retrieval.file_categorizer import categorize_file
 
     relations = get_related_files(repo_name, result_filenames, max_related=max_expansion)
-    related_files = []
     result_set = set(result_filenames)
+    related_files = []
 
     for rel in relations:
-        if rel.relation_type == "imports":
-            candidate = rel.target_file
-        else:
-            candidate = rel.source_file
-
+        candidate = rel.target_file if rel.relation_type == "imports" else rel.source_file
         if candidate not in result_set and categorize_file(candidate) == "implementation":
             related_files.append(candidate)
 

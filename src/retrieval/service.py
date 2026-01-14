@@ -1,11 +1,4 @@
-"""Search service - handles all code search operations.
-
-Implements modern code retrieval best practices:
-1. Tiered results (full code for top, references for rest)
-2. Score-based adaptive filtering
-3. Token-efficient output format
-4. Graph-based expansion for related files
-"""
+"""Search service - handles all code search operations."""
 
 import logging
 import re
@@ -25,24 +18,24 @@ FULL_CODE_COUNT = 3
 MAX_CHUNKS_PER_FILE = 3
 
 
-
 def extract_signature(content: str, language: str = "python") -> str:
     """Extract function/class signature from code content."""
     lines = content.strip().split("\n")
     signatures = []
 
+    signature_keywords = (
+        "def ", "async def ", "class ", "function ", "const ", "let ",
+        "var ", "fn ", "func ", "pub fn ", "impl ", "struct ", "enum ",
+        "interface ", "type ", "export ", "@",
+    )
+
+    comment_prefixes = ("#", "//", "/*", '"""', "'''")
+
     for line in lines:
         stripped = line.strip()
-        # Skip empty lines, comments, docstrings
-        if not stripped or stripped.startswith(("#", "//", "/*", '"""', "'''")):
+        if not stripped or stripped.startswith(comment_prefixes):
             continue
-        # Match common code signatures
-        if any(stripped.startswith(kw) for kw in [
-            "def ", "async def ", "class ", "function ", "const ", "let ",
-            "var ", "fn ", "func ", "pub fn ", "impl ", "struct ", "enum ",
-            "interface ", "type ", "export ", "@",
-        ]):
-            # Clean up the signature
+        if any(stripped.startswith(kw) for kw in signature_keywords):
             sig = stripped.split("{")[0].rstrip(" {:")
             signatures.append(sig)
             if len(signatures) >= 2:
@@ -51,10 +44,10 @@ def extract_signature(content: str, language: str = "python") -> str:
     if signatures:
         return "; ".join(signatures)
 
-    # Fallback: first non-empty, non-comment line
+    # Fall back to first non-comment line
     for line in lines[:5]:
         stripped = line.strip()
-        if stripped and not stripped.startswith(("#", "//", "/*", '"""', "'''")):
+        if stripped and not stripped.startswith(comment_prefixes):
             return stripped[:100]
 
     return lines[0][:80] if lines else ""
@@ -62,11 +55,9 @@ def extract_signature(content: str, language: str = "python") -> str:
 
 def parse_location(loc_str: str) -> str:
     """Convert location string to human-readable format."""
-    # Handle Range format like "[0, 1570)" -> "~L1-39"
     match = re.match(r'\[(\d+),\s*(\d+)\)', str(loc_str))
     if match:
         start, end = int(match.group(1)), int(match.group(2))
-        # Approximate line numbers (~40 chars/line average)
         start_line = start // 40 + 1
         end_line = end // 40
         if end_line > start_line:
@@ -250,20 +241,12 @@ class SearchService:
     ) -> list[str]:
         """Maximal Marginal Relevance for diverse result selection.
 
-        MMR = λ * Relevance(d) - (1-λ) * max Similarity(d, S)
-
         Balances relevance with diversity by penalizing results similar
-        to already-selected ones. In our case, "similarity" means same category.
+        to already-selected ones (same category = similar).
         """
         selected = []
         remaining = list(candidates)
-
-        category_counts = {
-            "implementation": 0,
-            "test": 0,
-            "documentation": 0,
-            "config": 0,
-        }
+        category_counts: dict[str, int] = {}
 
         while len(selected) < k and remaining:
             best_file = None
@@ -272,14 +255,10 @@ class SearchService:
             for candidate in remaining:
                 relevance = scores[candidate]
                 category = categories[candidate]
-
-                divisor = len(selected) if len(selected) > 0 else 1
+                divisor = max(len(selected), 1)
                 diversity_penalty = category_counts.get(category, 0) / divisor
 
-                mmr_score = (
-                    lambda_param * relevance
-                    - (1 - lambda_param) * diversity_penalty
-                )
+                mmr_score = lambda_param * relevance - (1 - lambda_param) * diversity_penalty
 
                 if mmr_score > best_mmr_score:
                     best_mmr_score = mmr_score
@@ -299,18 +278,11 @@ class SearchService:
         chunks: list,
         score: float,
     ) -> CodeSnippet:
-        """Build full code snippet for top results.
-
-        Returns complete function/class content without truncation.
-        """
-        # Sort by score and take top chunks
+        """Build full code snippet for top results."""
         chunks_by_score = sorted(chunks, key=lambda c: c.score, reverse=True)
         top_chunks = chunks_by_score[:MAX_CHUNKS_PER_FILE]
-
-        # Sort selected chunks by location for readability
         chunks_sorted = sorted(top_chunks, key=lambda c: c.location)
 
-        # Merge content without truncation - return full functions/classes
         content_parts = []
         locations = []
         seen_content = set()

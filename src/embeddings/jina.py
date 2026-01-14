@@ -5,7 +5,6 @@ This preserves cross-chunk context, improving retrieval by ~24%.
 """
 
 import logging
-from dataclasses import dataclass
 
 import httpx
 
@@ -14,14 +13,6 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 JINA_API_URL = "https://api.jina.ai/v1/embeddings"
-
-
-@dataclass
-class ChunkEmbedding:
-    """Embedding for a single chunk with metadata."""
-    text: str
-    embedding: list[float]
-    index: int
 
 
 def get_embedding(
