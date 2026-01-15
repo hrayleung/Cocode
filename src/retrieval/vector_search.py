@@ -2,23 +2,13 @@
 
 import logging
 import re
-from dataclasses import dataclass
 
 from config.settings import settings
 from src.embeddings.openai import get_embedding
+from src.models import SearchResult
 from src.storage.postgres import get_connection
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class SearchResult:
-    """Search result with metadata."""
-
-    filename: str
-    location: str
-    content: str
-    score: float
 
 
 def sanitize_identifier(name: str) -> str:
