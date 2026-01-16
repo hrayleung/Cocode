@@ -16,6 +16,7 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 
+from src.exceptions import SearchError
 from src.storage.postgres import get_connection
 
 from .tokenizer import tokenize_for_search
@@ -406,7 +407,7 @@ def bm25_search(
             return _search_native_fts(table_name, query, tokens, top_k, config)
         except Exception as e2:
             logger.error(f"All BM25 search backends failed: {e2}")
-            return []
+            raise SearchError(f"BM25 search failed: {e2}") from e2
 
 
 def get_corpus_stats(repo_name: str) -> dict:

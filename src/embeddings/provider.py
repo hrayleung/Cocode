@@ -1,5 +1,6 @@
 """Embedding provider protocol and implementations."""
 
+import threading
 from typing import Protocol
 
 
@@ -28,7 +29,7 @@ class OpenAIProvider:
 
 
 class JinaProvider:
-    """Jina embedding provider."""
+    """Jina embedding provider with late chunking support."""
 
     def get_embedding(self, text: str) -> list[float]:
         from src.embeddings.jina import get_embedding
@@ -40,15 +41,20 @@ class JinaProvider:
 
 
 _provider: EmbeddingProvider | None = None
+_provider_lock = threading.Lock()
 
 
 def get_provider() -> EmbeddingProvider:
-    """Get the configured embedding provider."""
+    """Get the configured embedding provider (thread-safe singleton)."""
     global _provider
-    if _provider is None:
-        from config.settings import settings
-        if settings.use_late_chunking and settings.jina_api_key:
-            _provider = JinaProvider()
-        else:
-            _provider = OpenAIProvider()
+    if _provider is not None:
+        return _provider
+
+    with _provider_lock:
+        if _provider is None:
+            from config.settings import settings
+            if settings.use_late_chunking and settings.jina_api_key:
+                _provider = JinaProvider()
+            else:
+                _provider = OpenAIProvider()
     return _provider

@@ -1,24 +1,28 @@
 """Cohere reranking for search results."""
 
 import logging
+import threading
 
 import cohere
 
 from config.settings import settings
-
-from .vector_search import SearchResult
+from src.models import SearchResult
 
 logger = logging.getLogger(__name__)
 
-# Initialize client lazily
 _client: cohere.Client | None = None
+_client_lock = threading.Lock()
 
 
 def get_client() -> cohere.Client:
-    """Get or create the Cohere client."""
+    """Get or create the Cohere client (thread-safe singleton)."""
     global _client
-    if _client is None:
-        _client = cohere.Client(api_key=settings.cohere_api_key)
+    if _client is not None:
+        return _client
+
+    with _client_lock:
+        if _client is None:
+            _client = cohere.Client(api_key=settings.cohere_api_key)
     return _client
 
 

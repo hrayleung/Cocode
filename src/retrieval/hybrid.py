@@ -3,17 +3,18 @@
 import logging
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from typing import Callable
 
 from config.settings import settings
-from src.embeddings.openai import get_embedding as get_embedding_openai
-from src.embeddings import jina as jina_embeddings
+from src.embeddings import get_provider, OpenAIProvider
 from src.exceptions import SearchError
+from src.models import SearchResult
 
 from .bm25_search import BM25Config, bm25_search
 from .centrality import get_centrality_scores
 from .file_categorizer import apply_category_boosting
 from .reranker import rerank_results
-from .vector_search import SearchResult, vector_search
+from .vector_search import vector_search
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +41,18 @@ def apply_centrality_boost(
 
 
 def get_query_embedding(query: str) -> list[float]:
-    """Get embedding for search query, using Jina if configured."""
-    use_jina = settings.jina_api_key and settings.use_late_chunking
-    if not use_jina:
+    """Get embedding for search query using configured provider with fallback."""
+    from src.embeddings.openai import get_embedding as get_embedding_openai
+
+    provider = get_provider()
+
+    # OpenAI provider: use query context for better retrieval
+    if isinstance(provider, OpenAIProvider):
         return get_embedding_openai(query, add_query_context=True)
 
+    # Jina provider: try with fallback to OpenAI
     try:
-        return jina_embeddings.get_embedding(query, task="retrieval.query")
+        return provider.get_embedding(query)
     except Exception as e:
         logger.warning(f"Jina query embedding failed: {e}. Falling back to OpenAI.")
         return get_embedding_openai(query, add_query_context=True)
@@ -95,6 +101,49 @@ def reciprocal_rank_fusion(
     ]
 
 
+def _execute_search(
+    search_fn: Callable[[], list[SearchResult]],
+    name: str,
+) -> tuple[list[SearchResult], bool]:
+    """Execute a search function with error handling.
+
+    Returns:
+        Tuple of (results, failed) where failed is True if the search raised an exception.
+    """
+    try:
+        return search_fn(), False
+    except Exception as e:
+        logger.warning(f"{name} search failed: {e}")
+        return [], True
+
+
+def _run_searches_parallel(
+    vector_fn: Callable[[], list[SearchResult]],
+    bm25_fn: Callable[[], list[SearchResult]],
+) -> tuple[list[SearchResult], list[SearchResult], bool, bool]:
+    """Run vector and BM25 searches in parallel."""
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_vector = executor.submit(vector_fn)
+        future_bm25 = executor.submit(bm25_fn)
+
+        vector_results, vector_failed = [], False
+        bm25_results, bm25_failed = [], False
+
+        try:
+            vector_results = future_vector.result(timeout=30)
+        except Exception as e:
+            logger.warning(f"Vector search failed: {e}")
+            vector_failed = True
+
+        try:
+            bm25_results = future_bm25.result(timeout=30)
+        except Exception as e:
+            logger.warning(f"BM25 search failed: {e}")
+            bm25_failed = True
+
+    return vector_results, bm25_results, vector_failed, bm25_failed
+
+
 def hybrid_search(
     repo_name: str,
     query: str,
@@ -106,7 +155,6 @@ def hybrid_search(
     parallel: bool = True,
 ) -> list[SearchResult]:
     """Perform hybrid search combining vector and BM25 with optional reranking."""
-    # Use settings defaults if not specified
     rerank_count = rerank_candidates or settings.rerank_candidates
     vec_weight = vector_weight if vector_weight is not None else settings.vector_weight
     bm_weight = bm25_weight if bm25_weight is not None else settings.bm25_weight
@@ -114,42 +162,28 @@ def hybrid_search(
     query_embedding = get_query_embedding(query)
     bm25_config = BM25Config(k1=settings.bm25_k1, b=settings.bm25_b)
 
-    def run_vector_search():
+    def run_vector() -> list[SearchResult]:
         return vector_search(repo_name, query, top_k=rerank_count, query_embedding=query_embedding)
 
-    def run_bm25_search():
+    def run_bm25() -> list[SearchResult]:
         return bm25_search(repo_name, query, top_k=rerank_count, config=bm25_config)
 
-    vector_results = []
-    bm25_results = []
-
     if parallel:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future_vector = executor.submit(run_vector_search)
-            future_bm25 = executor.submit(run_bm25_search)
-
-            try:
-                vector_results = future_vector.result(timeout=30)
-            except Exception as e:
-                logger.warning(f"Vector search failed: {e}")
-            try:
-                bm25_results = future_bm25.result(timeout=30)
-            except Exception as e:
-                logger.warning(f"BM25 search failed: {e}")
-
-        if not vector_results and not bm25_results:
-            raise SearchError("All search backends failed")
-
-        if not vector_results:
-            logger.warning("Vector search failed, using BM25-only results")
-        if not bm25_results:
-            logger.warning("BM25 search failed, using vector-only results")
+        vector_results, bm25_results, vector_failed, bm25_failed = _run_searches_parallel(
+            run_vector, run_bm25
+        )
     else:
         logger.debug(f"Running vector search for '{query}' in {repo_name}")
-        vector_results = run_vector_search()
-
+        vector_results, vector_failed = _execute_search(run_vector, "Vector")
         logger.debug(f"Running BM25 search for '{query}' in {repo_name}")
-        bm25_results = run_bm25_search()
+        bm25_results, bm25_failed = _execute_search(run_bm25, "BM25")
+
+    if vector_failed and bm25_failed:
+        raise SearchError("All search backends failed")
+    if vector_failed:
+        logger.warning("Vector search failed, using BM25-only results")
+    if bm25_failed:
+        logger.warning("BM25 search failed, using vector-only results")
 
     logger.info(f"Search results: vector={len(vector_results)}, bm25={len(bm25_results)}")
 
@@ -163,17 +197,14 @@ def hybrid_search(
     if settings.centrality_weight > 0:
         apply_centrality_boost(candidates, repo_name, settings.centrality_weight)
 
-    # Apply category boosting before reranking to prioritize implementation files
     apply_category_boosting(candidates, sort=True)
 
     if use_reranker and settings.cohere_api_key and candidates:
         rerank_input = candidates[:top_k * 2]
         logger.debug(f"Reranking {len(rerank_input)} candidates with Cohere")
-        final_results = rerank_results(query, rerank_input, top_n=top_k)
-    else:
-        final_results = candidates[:top_k]
+        return rerank_results(query, rerank_input, top_n=top_k)
 
-    return final_results
+    return candidates[:top_k]
 
 
 def _format_results(results: list[SearchResult]) -> list[dict]:
