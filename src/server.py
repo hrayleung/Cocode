@@ -27,6 +27,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Bounds for top_k parameter
+MIN_TOP_K = 1
+MAX_TOP_K = 100
+
 # Initialize FastMCP server
 mcp = FastMCP(
     "cocode",
@@ -54,7 +58,7 @@ async def codebase_retrieval(
                         "where is the database connection handled",
                         "error handling in API routes"
         path: Path to the codebase (defaults to current working directory)
-        top_k: Number of files to return (default: 10)
+        top_k: Number of files to return (default: 10, max: 100)
                - Use 3-5 for focused queries targeting specific functions/classes
                - Use 10-15 for understanding a feature or subsystem
                - Use 20-30 for broad exploration or finding all related code
@@ -66,6 +70,12 @@ async def codebase_retrieval(
     # Validate inputs
     if not query or not query.strip():
         return [{"error": "Query cannot be empty"}]
+
+    # Validate top_k bounds
+    if top_k < MIN_TOP_K:
+        return [{"error": f"top_k must be at least {MIN_TOP_K}, got {top_k}"}]
+    if top_k > MAX_TOP_K:
+        return [{"error": f"top_k cannot exceed {MAX_TOP_K}, got {top_k}"}]
 
     # Default to current directory
     if path is None:

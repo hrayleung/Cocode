@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import cocoindex
+from psycopg import sql
 
 from config.settings import settings
 from src.exceptions import IndexingError, PathError
@@ -154,7 +155,11 @@ class IndexerService:
         # Get stored files from DB
         with get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(f"SELECT DISTINCT filename FROM {table_name}")
+                # Use sql.Identifier to prevent SQL injection
+                query = sql.SQL("SELECT DISTINCT filename FROM {}").format(
+                    sql.Identifier(table_name)
+                )
+                cur.execute(query)
                 stored_files = {row[0] for row in cur.fetchall()}
 
         # Get current files on disk
@@ -242,7 +247,11 @@ class IndexerService:
                         logger.warning(f"Chunks table does not exist: {chunks_table}")
                         return False
 
-                    cur.execute(f"SELECT COUNT(*) FROM {chunks_table}")
+                    # Use sql.Identifier to prevent SQL injection
+                    count_query = sql.SQL("SELECT COUNT(*) FROM {}").format(
+                        sql.Identifier(chunks_table)
+                    )
+                    cur.execute(count_query)
                     chunk_count = cur.fetchone()[0]
 
                     if chunk_count == 0:
@@ -298,7 +307,10 @@ class IndexerService:
         return self._full_index(repo_name, repo_path)
 
     def _delete_index(self, repo_name: str) -> None:
-        """Delete an existing index by dropping database tables."""
+        """Delete an existing index by dropping database tables.
+
+        Uses explicit transaction to ensure atomic deletion of all related tables.
+        """
         from src.storage.postgres import get_connection
         from src.retrieval.vector_search import sanitize_identifier
 
@@ -308,11 +320,20 @@ class IndexerService:
 
         try:
             with get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(f"DROP TABLE IF EXISTS {chunks_table} CASCADE")
-                    cur.execute(f"DROP TABLE IF EXISTS {tracking_table} CASCADE")
-                    cur.execute("DELETE FROM repos WHERE name = %s", (repo_name,))
-                conn.commit()
+                # Use explicit transaction for atomic deletion
+                with conn.transaction():
+                    with conn.cursor() as cur:
+                        # Use sql.Identifier to prevent SQL injection
+                        drop_chunks = sql.SQL("DROP TABLE IF EXISTS {} CASCADE").format(
+                            sql.Identifier(chunks_table)
+                        )
+                        drop_tracking = sql.SQL("DROP TABLE IF EXISTS {} CASCADE").format(
+                            sql.Identifier(tracking_table)
+                        )
+                        cur.execute(drop_chunks)
+                        cur.execute(drop_tracking)
+                        cur.execute("DELETE FROM repos WHERE name = %s", (repo_name,))
+                    # Transaction automatically commits on success
             logger.info(f"Deleted index tables for {repo_name}")
         except Exception as e:
             logger.warning(f"Could not delete index for {repo_name}: {e}")
@@ -320,25 +341,22 @@ class IndexerService:
         delete_centrality_table(repo_name)
 
     def _incremental_update(self, repo_name: str, repo_path: str) -> IndexResult:
-        """Perform incremental update on an existing index."""
+        """Perform incremental update on an existing index.
+
+        CocoIndex manages its own database transactions internally.
+        If any step fails, the index state is preserved.
+        """
         try:
             self._init_cocoindex()
 
             flow = create_indexing_flow(repo_name, repo_path)
 
-            from src.storage.postgres import get_connection
-            with get_connection() as conn:
-                try:
-                    flow.setup()
-                    conn.commit()
-                    logger.debug(f"Committed after setup() for {repo_name}")
+            # CocoIndex manages its own DB connections - no transaction wrapper needed
+            flow.setup()
+            logger.debug(f"Completed setup() for {repo_name}")
 
-                    flow.update()
-                    conn.commit()
-                    logger.debug(f"Committed after update() for {repo_name}")
-                except Exception:
-                    conn.rollback()
-                    raise
+            flow.update()
+            logger.debug(f"Completed update() for {repo_name}")
 
             file_count, chunk_count = self._get_stats(repo_name)
 
@@ -374,7 +392,11 @@ class IndexerService:
             )
 
     def _full_index(self, repo_name: str, repo_path: str) -> IndexResult:
-        """Perform full indexing of a codebase."""
+        """Perform full indexing of a codebase.
+
+        CocoIndex manages its own database transactions internally.
+        If any step fails, the repo status is updated accordingly.
+        """
         self._repo_manager.register_repo(repo_name, repo_path)
         self._repo_manager.update_status(repo_name, "indexing")
 
@@ -390,19 +412,12 @@ class IndexerService:
             except Exception as e:
                 logger.debug(f"No existing flow to drop: {e}")
 
-            from src.storage.postgres import get_connection
-            with get_connection() as conn:
-                try:
-                    flow.setup()
-                    conn.commit()
-                    logger.debug(f"Committed after setup() for {repo_name}")
+            # CocoIndex manages its own DB connections - no transaction wrapper needed
+            flow.setup()
+            logger.debug(f"Completed setup() for {repo_name}")
 
-                    flow.update()
-                    conn.commit()
-                    logger.debug(f"Committed after update() for {repo_name}")
-                except Exception:
-                    conn.rollback()
-                    raise
+            flow.update()
+            logger.debug(f"Completed update() for {repo_name}")
 
             file_count, chunk_count = self._get_stats(repo_name)
 

@@ -1,5 +1,6 @@
 """Database schema definitions."""
 
+import re
 from psycopg import sql
 
 REPOS_TABLE = """
@@ -17,17 +18,86 @@ CREATE TABLE IF NOT EXISTS repos (
 """
 
 
-def get_create_schema_sql(repo_name: str) -> sql.Composed:
-    """Generate SQL to create a schema for a repository."""
+def validate_schema_name(schema_name: str) -> None:
+    """Validate that a schema name is safe and follows PostgreSQL rules.
+
+    Note: When using sql.Identifier(), PostgreSQL allows identifiers that start
+    with digits or are reserved keywords because they are properly quoted.
+    This validation ensures the name is safe to use with sql.Identifier().
+
+    Args:
+        schema_name: The schema name to validate
+
+    Raises:
+        ValueError: If the schema name is invalid
+    """
+    if not schema_name:
+        raise ValueError("Schema name cannot be empty")
+
+    # Must match pattern: lowercase alphanumeric and underscores only
+    # Note: sql.Identifier() properly quotes identifiers, so digit-leading
+    # names (e.g., "2024_project") are allowed by PostgreSQL
+    if not re.match(r'^[a-z0-9_]+$', schema_name):
+        raise ValueError(
+            f"Schema name '{schema_name}' contains invalid characters. "
+            "Only lowercase letters, numbers, and underscores are allowed."
+        )
+
+    # PostgreSQL identifier length limit is 63 bytes
+    if len(schema_name.encode('utf-8')) > 63:
+        raise ValueError(f"Schema name '{schema_name}' exceeds PostgreSQL 63-byte limit")
+
+
+def sanitize_repo_name(repo_name: str) -> str:
+    """Sanitize and validate a repository name for use as a PostgreSQL schema name.
+
+    Args:
+        repo_name: Repository name to sanitize
+
+    Returns:
+        Sanitized schema name
+
+    Raises:
+        ValueError: If the sanitized name is invalid
+    """
     schema_name = repo_name.replace("-", "_").replace(".", "_").lower()
+    validate_schema_name(schema_name)
+    return schema_name
+
+
+def get_create_schema_sql(repo_name: str) -> sql.Composed:
+    """Generate SQL to create a schema for a repository.
+
+    Args:
+        repo_name: Repository name (will be sanitized and validated)
+
+    Returns:
+        Composed SQL query
+
+    Raises:
+        ValueError: If the sanitized schema name is invalid
+    """
+    schema_name = sanitize_repo_name(repo_name)
+
     return sql.SQL("CREATE SCHEMA IF NOT EXISTS {};").format(
         sql.Identifier(schema_name)
     )
 
 
 def get_create_chunks_table_sql(repo_name: str, dimensions: int = 3072) -> sql.Composed:
-    """Generate SQL to create chunks table for a repository."""
-    schema_name = repo_name.replace("-", "_").replace(".", "_").lower()
+    """Generate SQL to create chunks table for a repository.
+
+    Args:
+        repo_name: Repository name (will be sanitized and validated)
+        dimensions: Vector embedding dimensions (default: 3072 for text-embedding-3-large)
+
+    Returns:
+        Composed SQL query
+
+    Raises:
+        ValueError: If the sanitized schema name is invalid
+    """
+    schema_name = sanitize_repo_name(repo_name)
     chunks_table = sql.Identifier(schema_name, "chunks")
 
     embedding_index = sql.Identifier(f"{schema_name}_chunks_embedding_idx")

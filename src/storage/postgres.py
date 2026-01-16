@@ -42,7 +42,30 @@ def close_pool() -> None:
 
 @contextmanager
 def get_connection() -> Iterator:
-    """Get a connection from the pool."""
+    """Get a connection from the pool.
+
+    Transaction behavior:
+    - By default, psycopg connections start in autocommit=False mode
+    - Changes must be committed explicitly with conn.commit()
+    - The connection is automatically returned to the pool on context exit
+    - Use conn.transaction() for explicit transaction boundaries
+    - Uncommitted changes are rolled back when the connection is returned
+
+    Usage:
+        # Explicit transaction management (recommended)
+        with get_connection() as conn:
+            with conn.transaction():
+                cur.execute(...)  # Automatically committed on success
+
+        # Manual commit/rollback
+        with get_connection() as conn:
+            try:
+                cur.execute(...)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+    """
     pool = get_pool()
     with pool.connection() as conn:
         yield conn
