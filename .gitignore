@@ -52,3 +52,6 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local diagnostics
+comparison_results.json

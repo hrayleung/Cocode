@@ -1,6 +1,7 @@
 """Hybrid search combining vector and BM25 with Reciprocal Rank Fusion."""
 
 import logging
+import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
@@ -42,7 +43,7 @@ def apply_centrality_boost(
 
 
 def get_query_embedding(query: str) -> list[float]:
-    """Get embedding for search query using configured provider with fallback."""
+    """Get embedding for a search query using the configured provider."""
     from src.embeddings.openai import get_embedding as get_embedding_openai
 
     provider = get_provider()
@@ -51,12 +52,8 @@ def get_query_embedding(query: str) -> list[float]:
     if isinstance(provider, OpenAIProvider):
         return get_embedding_openai(query, add_query_context=True)
 
-    # Jina provider: try with fallback to OpenAI
-    try:
-        return provider.get_embedding(query)
-    except Exception as e:
-        logger.warning(f"Jina query embedding failed: {e}. Falling back to OpenAI.")
-        return get_embedding_openai(query, add_query_context=True)
+    # Jina provider: keep consistent with the index embedding space
+    return provider.get_embedding(query)
 
 
 def reciprocal_rank_fusion(
@@ -191,13 +188,37 @@ def hybrid_search(
     bm_weight = bm25_weight if bm25_weight is not None else settings.bm25_weight
     sym_weight = symbol_weight if symbol_weight is not None else settings.symbol_weight
 
-    query_embedding = get_query_embedding(query)
+    query_embedding: list[float] | None = None
+    query_embedding_error: Exception | None = None
+    query_embedding_lock = threading.Lock()
+
+    def get_query_embedding_cached() -> list[float]:
+        nonlocal query_embedding, query_embedding_error
+        if query_embedding_error is not None:
+            raise query_embedding_error
+        if query_embedding is not None:
+            return query_embedding
+        with query_embedding_lock:
+            if query_embedding_error is not None:
+                raise query_embedding_error
+            if query_embedding is None:
+                try:
+                    query_embedding = get_query_embedding(query)
+                except Exception as e:
+                    query_embedding_error = e
+                    raise
+            return query_embedding
     bm25_config = BM25Config(k1=settings.bm25_k1, b=settings.bm25_b)
 
     symbols_attempted = include_symbols and settings.enable_symbol_indexing
 
     def run_vector() -> list[SearchResult]:
-        return vector_search(repo_name, query, top_k=rerank_count, query_embedding=query_embedding)
+        return vector_search(
+            repo_name,
+            query,
+            top_k=rerank_count,
+            query_embedding=get_query_embedding_cached(),
+        )
 
     def run_bm25() -> list[SearchResult]:
         return bm25_search(repo_name, query, top_k=rerank_count, config=bm25_config)
@@ -205,7 +226,12 @@ def hybrid_search(
     def run_symbol() -> list[SearchResult]:
         if not symbols_attempted:
             return []
-        return symbol_hybrid_search(repo_name, query, top_k=rerank_count, query_embedding=query_embedding)
+        return symbol_hybrid_search(
+            repo_name,
+            query,
+            top_k=rerank_count,
+            query_embedding=get_query_embedding_cached(),
+        )
 
     if parallel:
         vector_results, bm25_results, symbol_results, vector_failed, bm25_failed, symbol_failed = _run_searches_parallel(

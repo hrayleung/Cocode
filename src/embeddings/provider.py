@@ -44,6 +44,7 @@ def get_provider() -> EmbeddingProvider:
 
     with _provider_lock:
         if _provider is None:
-            from config.settings import settings
-            _provider = JinaProvider() if (settings.use_late_chunking and settings.jina_api_key) else OpenAIProvider()
+            from src.embeddings.backend import should_use_jina
+
+            _provider = JinaProvider() if should_use_jina() else OpenAIProvider()
     return _provider

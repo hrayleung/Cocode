@@ -4,6 +4,8 @@ import logging
 import re
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
+import bisect
 
 from config.settings import settings
 from src.exceptions import SearchError
@@ -80,6 +82,60 @@ def parse_location(loc_str: str) -> str:
         return f"~L{start_line}"
 
     return str(loc_str)
+
+
+def location_to_lines(
+    filename: str,
+    loc_str: str,
+    repo_path: str | None,
+    file_bytes_cache: dict[str, bytes],
+    newline_index_cache: dict[str, list[int]],
+) -> str:
+    """Convert a location string into 1-indexed line ranges when possible."""
+    # Symbol location format: "line_start:line_end"
+    if ':' in str(loc_str) and '[' not in str(loc_str):
+        parts = str(loc_str).split(':')
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            start_line = int(parts[0])
+            end_line = int(parts[1])
+            if end_line > start_line:
+                return f"L{start_line}-{end_line}"
+            return f"L{start_line}"
+
+    # Chunk range format: "[start, end)"
+    match = re.match(r'\[(\d+),\s*(\d+)\)', str(loc_str))
+    if not match:
+        return str(loc_str)
+
+    if not repo_path:
+        return parse_location(loc_str)
+
+    start, end = int(match.group(1)), int(match.group(2))
+
+    if filename in newline_index_cache:
+        newlines = newline_index_cache[filename]
+    else:
+        try:
+            if filename in file_bytes_cache:
+                data = file_bytes_cache[filename]
+            else:
+                data = (Path(repo_path) / filename).read_bytes()
+                file_bytes_cache[filename] = data
+        except Exception:
+            return parse_location(loc_str)
+
+        newlines = [i for i, b in enumerate(data) if b == 10]
+        newline_index_cache[filename] = newlines
+
+    # Offsets are treated as byte offsets. end is exclusive.
+    start_off = max(start, 0)
+    end_off = max(end - 1, start_off)
+    start_line = bisect.bisect_right(newlines, start_off - 1) + 1
+    end_line = bisect.bisect_right(newlines, end_off - 1) + 1
+
+    if end_line > start_line:
+        return f"L{start_line}-{end_line}"
+    return f"L{start_line}"
 
 
 @dataclass
@@ -161,13 +217,27 @@ class SearchService:
             if not results:
                 return []
 
+            repo_path: str | None = None
+            try:
+                from src.indexer.repo_manager import RepoManager
+
+                repo = RepoManager().get_repo(repo_name)
+                repo_path = repo.path if repo else None
+            except Exception:
+                repo_path = None
+
             # Apply adaptive score filtering
             top_score = results[0].score
             min_score = top_score * MIN_SCORE_RATIO
             filtered = [r for r in results if r.score >= min_score]
+            # Guard: don't let filtering collapse results to far fewer files than requested.
+            total_files = len({r.filename for r in results})
+            filtered_files = len({r.filename for r in filtered})
+            if filtered_files < min(top_k, total_files):
+                filtered = results
 
             # Aggregate by file with tiered presentation
-            file_results = self._aggregate_tiered(filtered, top_k, full_code_count)
+            file_results = self._aggregate_tiered(filtered, top_k, full_code_count, repo_path)
 
             # Expand with related files (imports/imported-by)
             if expand_related and file_results:
@@ -201,6 +271,7 @@ class SearchService:
         results: list,
         top_k: int,
         full_code_count: int,
+        repo_path: str | None,
     ) -> list[CodeSnippet]:
         """Aggregate results with tiered presentation.
 
@@ -233,15 +304,32 @@ class SearchService:
             all_files, file_scores, file_categories, top_k, settings.diversity_lambda
         )
 
+        file_bytes_cache: dict[str, bytes] = {}
+        newline_index_cache: dict[str, list[int]] = {}
+
         aggregated = []
         for i, filename in enumerate(selected):
             chunks = file_chunks[filename]
             is_top_result = i < full_code_count
 
             if is_top_result:
-                snippet = self._build_full_snippet(filename, chunks, file_scores[filename])
+                snippet = self._build_full_snippet(
+                    filename,
+                    chunks,
+                    file_scores[filename],
+                    repo_path,
+                    file_bytes_cache,
+                    newline_index_cache,
+                )
             else:
-                snippet = self._build_reference_snippet(filename, chunks, file_scores[filename])
+                snippet = self._build_reference_snippet(
+                    filename,
+                    chunks,
+                    file_scores[filename],
+                    repo_path,
+                    file_bytes_cache,
+                    newline_index_cache,
+                )
 
             aggregated.append(snippet)
 
@@ -293,6 +381,9 @@ class SearchService:
         filename: str,
         chunks: list,
         score: float,
+        repo_path: str | None,
+        file_bytes_cache: dict[str, bytes],
+        newline_index_cache: dict[str, list[int]],
     ) -> CodeSnippet:
         """Build full code snippet for top results."""
         chunks_by_score = sorted(chunks, key=lambda c: c.score, reverse=True)
@@ -309,7 +400,15 @@ class SearchService:
                 seen_content.add(content_hash)
                 content_parts.append(chunk.content)
                 if chunk.location:
-                    locations.append(str(chunk.location))
+                    locations.append(
+                        location_to_lines(
+                            filename,
+                            str(chunk.location),
+                            repo_path,
+                            file_bytes_cache,
+                            newline_index_cache,
+                        )
+                    )
 
         return CodeSnippet(
             filename=filename,
@@ -324,6 +423,9 @@ class SearchService:
         filename: str,
         chunks: list,
         score: float,
+        repo_path: str | None,
+        file_bytes_cache: dict[str, bytes],
+        newline_index_cache: dict[str, list[int]],
     ) -> CodeSnippet:
         """Build compact reference for lower-relevance results."""
         # Get best chunk for signature extraction
@@ -332,7 +434,16 @@ class SearchService:
 
         # Collect and format locations
         raw_locations = sorted(set(str(c.location) for c in chunks if c.location))
-        locations = [parse_location(loc) for loc in raw_locations[:3]]  # Limit to 3
+        locations = [
+            location_to_lines(
+                filename,
+                loc,
+                repo_path,
+                file_bytes_cache,
+                newline_index_cache,
+            )
+            for loc in raw_locations[:3]
+        ]
 
         return CodeSnippet(
             filename=filename,

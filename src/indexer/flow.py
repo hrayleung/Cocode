@@ -128,45 +128,6 @@ def add_context_header(filename: str, language: str, location: str, content: str
     return header + content
 
 
-def use_jina_embeddings() -> bool:
-    """Check if Jina embeddings should be used (late chunking enabled).
-
-    Validates the Jina API key by making a test request.
-    Falls back to OpenAI if Jina is not available or fails.
-    """
-    if not settings.jina_api_key or not settings.use_late_chunking:
-        return False
-
-    try:
-        response = httpx.post(
-            "https://api.jina.ai/v1/embeddings",
-            headers={
-                "Authorization": f"Bearer {settings.jina_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": settings.jina_model,
-                "input": ["test"],
-                "dimensions": settings.embedding_dimensions,
-                "task": "retrieval.query",
-                "normalized": True,
-            },
-            timeout=10.0,
-        )
-
-        if response.status_code == 403:
-            logger.warning("Jina API key is invalid (403 Forbidden). Falling back to OpenAI.")
-            return False
-        if response.status_code != 200:
-            logger.warning(f"Jina API returned {response.status_code}. Falling back to OpenAI.")
-            return False
-
-        return True
-    except Exception as e:
-        logger.warning(f"Jina API validation failed: {e}. Falling back to OpenAI.")
-        return False
-
-
 @cocoindex.transform_flow()
 def text_to_embedding_openai(text: cocoindex.DataSlice[str]) -> cocoindex.DataSlice[list[float]]:
     """Transform text to embeddings using OpenAI."""
@@ -250,8 +211,10 @@ def create_indexing_flow(
         data_scope: cocoindex.DataScope,
     ):
         # Select embedding function based on configuration
-        # Note: use_jina_embeddings() makes a network validation call, so cache the result
-        use_jina = use_jina_embeddings()
+        # Note: should_use_jina() makes a network validation call, so cache the result
+        from src.embeddings.backend import should_use_jina
+
+        use_jina = should_use_jina()
         embed_fn = text_to_embedding_jina if use_jina else text_to_embedding_openai
         if use_jina:
             logger.info("Using Jina embeddings with late chunking")

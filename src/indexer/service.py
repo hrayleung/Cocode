@@ -313,10 +313,15 @@ class IndexerService:
         """
         from src.storage.postgres import get_connection
         from src.retrieval.vector_search import sanitize_identifier
+        from src.indexer.flow import clear_flow_cache
+        from src.storage.schema import sanitize_repo_name
 
         safe_name = sanitize_identifier(repo_name)
         chunks_table = get_chunks_table_name(repo_name)
         tracking_table = f"codeindex_{safe_name}__cocoindex_tracking"
+
+        # Close any cached flow handles to avoid stale state during re-index.
+        clear_flow_cache(repo_name)
 
         try:
             with get_connection() as conn:
@@ -333,6 +338,14 @@ class IndexerService:
                         cur.execute(drop_chunks)
                         cur.execute(drop_tracking)
                         cur.execute("DELETE FROM repos WHERE name = %s", (repo_name,))
+
+                        # Drop the per-repo schema used for symbols/edges/cache.
+                        schema_name = sanitize_repo_name(repo_name)
+                        cur.execute(
+                            sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                                sql.Identifier(schema_name)
+                            )
+                        )
                     # Transaction automatically commits on success
             logger.info(f"Deleted index tables for {repo_name}")
         except Exception as e:
@@ -357,6 +370,14 @@ class IndexerService:
 
             flow.update()
             logger.debug(f"Completed update() for {repo_name}")
+
+            # Keep symbol index in sync with chunk index.
+            try:
+                from src.indexer.symbol_indexing import index_repository_symbols
+
+                index_repository_symbols(repo_name, repo_path)
+            except Exception as e:
+                logger.warning(f"Symbol indexing failed for {repo_name}: {e}")
 
             file_count, chunk_count = self._get_stats(repo_name)
 
@@ -418,6 +439,14 @@ class IndexerService:
 
             flow.update()
             logger.debug(f"Completed update() for {repo_name}")
+
+            # Build/refresh symbol index for symbol-level retrieval and line-level locations.
+            try:
+                from src.indexer.symbol_indexing import index_repository_symbols
+
+                index_repository_symbols(repo_name, repo_path)
+            except Exception as e:
+                logger.warning(f"Symbol indexing failed for {repo_name}: {e}")
 
             file_count, chunk_count = self._get_stats(repo_name)
 
