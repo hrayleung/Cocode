@@ -13,6 +13,8 @@ All backends use proper:
 """
 
 import logging
+import threading
+import time
 from dataclasses import dataclass
 from enum import Enum
 
@@ -41,6 +43,9 @@ class BM25Config:
 
 # Cached backend availability
 _available_backend: BM25Backend | None = None
+
+_fts_ready_cache: dict[str, tuple[bool, float]] = {}
+_fts_ready_lock = threading.Lock()
 
 
 def _check_extension_available(extension: str) -> bool:
@@ -310,13 +315,25 @@ def ensure_fts_index(repo_name: str) -> bool:
     Returns:
         True if index was created or already exists
     """
+    now = time.monotonic()
+    with _fts_ready_lock:
+        cached = _fts_ready_cache.get(repo_name)
+        if cached and cached[0] and (now - cached[1]) < 300.0:
+            return True
+        if cached and not cached[0] and (now - cached[1]) < 30.0:
+            return False
+
     try:
         from .fts_setup import setup_fts_for_repo
-        return setup_fts_for_repo(repo_name)
+        ok = setup_fts_for_repo(repo_name)
     except Exception as e:
         logger.warning(f"Could not set up enhanced FTS for {repo_name}: {e}")
         # Fall back to basic FTS setup
-        return _ensure_basic_fts_index(repo_name)
+        ok = _ensure_basic_fts_index(repo_name)
+
+    with _fts_ready_lock:
+        _fts_ready_cache[repo_name] = (ok, now)
+    return ok
 
 
 def _ensure_basic_fts_index(repo_name: str) -> bool:
@@ -391,8 +408,9 @@ def bm25_search(
     if not tokens:
         return []
 
-    ensure_fts_index(repo_name)
     backend = detect_backend()
+    if backend == BM25Backend.NATIVE_FTS:
+        ensure_fts_index(repo_name)
 
     try:
         if backend == BM25Backend.PG_SEARCH:

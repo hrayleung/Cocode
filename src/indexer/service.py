@@ -3,6 +3,7 @@
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +39,9 @@ class IndexerService:
     def __init__(self):
         self._repo_manager = RepoManager()
         self._initialized = False
+        # Cache for file change checks on repeated queries.
+        # Keys are repo_name; values are (last_indexed_ts, checked_at_monotonic, changed)
+        self._change_check_cache: dict[str, tuple[float, float, bool]] = {}
 
     def _init_cocoindex(self) -> None:
         """Initialize CocoIndex with required environment variables."""
@@ -191,40 +195,77 @@ class IndexerService:
     def _has_files_changed(self, repo_name: str, repo_path: str) -> bool:
         """Check if any indexed files have changed.
 
-        Detects changes by comparing:
-        1. Set of indexed files vs current files on disk
-        2. File modification times vs last index time
+        Note: This is called on every query via ensure_indexed(). Keep it fast.
+
+        Detects changes by checking whether any relevant file has mtime > last_indexed.
+
+        This avoids expensive DB scans (COUNT(DISTINCT ...) / SELECT DISTINCT ...) and avoids
+        `Path.rglob()` traversal into large excluded folders like node_modules by pruning during walk.
+
+        Deleted files are not detected (stale index entries persist until the next update).
         """
-        repo_path_obj = Path(repo_path)
-        stored_files, current_files = self._get_indexed_files(repo_name, repo_path_obj)
+        import fnmatch
 
-        # Check for added or removed files
-        if stored_files != current_files:
-            added = current_files - stored_files
-            removed = stored_files - current_files
-            if added:
-                logger.debug(f"New files detected: {list(added)[:5]}...")
-            if removed:
-                logger.debug(f"Removed files detected: {list(removed)[:5]}...")
-            return True
-
-        # Check file modification times vs last index time
         repo = self._repo_manager.get_repo(repo_name)
         if not (repo and repo.last_indexed):
             return False
 
         last_indexed_ts = repo.last_indexed.timestamp()
-        for relative_path in current_files:
-            file_path = repo_path_obj / relative_path
-            try:
-                if file_path.stat().st_mtime > last_indexed_ts:
-                    logger.debug(f"Modified file detected: {relative_path}")
-                    return True
-            except OSError:
-                # File might have been deleted, trigger re-index
-                return True
+        now = time.monotonic()
 
-        return False
+        cached = self._change_check_cache.get(repo_name)
+        if cached and cached[0] == last_indexed_ts and (now - cached[1]) < 5.0:
+            return cached[2]
+
+        repo_path_obj = Path(repo_path)
+
+        excluded_patterns = settings.excluded_patterns
+        included_extensions = {ext.lower() for ext in settings.included_extensions}
+
+        def is_excluded_part(name: str) -> bool:
+            return any(fnmatch.fnmatch(name, pattern) for pattern in excluded_patterns)
+
+        # Walk and prune excluded directories to avoid scanning huge trees.
+        changed = False
+        for root, dirnames, filenames in os.walk(repo_path, topdown=True):
+            dirnames[:] = [
+                d for d in dirnames
+                if not d.startswith(".") and not is_excluded_part(d)
+            ]
+
+            for filename in filenames:
+                if filename.startswith(".") or is_excluded_part(filename):
+                    continue
+
+                ext = os.path.splitext(filename)[1].lower()
+                if ext not in included_extensions:
+                    continue
+
+                full_path = Path(root) / filename
+                try:
+                    relative_path = full_path.relative_to(repo_path_obj)
+                except ValueError:
+                    continue
+
+                # Match historical behavior: exclude any path containing an excluded part.
+                if any(is_excluded_part(part) for part in relative_path.parts):
+                    continue
+
+                try:
+                    if full_path.stat().st_mtime > last_indexed_ts:
+                        logger.debug(f"Modified file detected: {relative_path}")
+                        changed = True
+                        break
+                except OSError:
+                    # File might have been deleted/moved mid-walk; trigger re-index.
+                    changed = True
+                    break
+
+            if changed:
+                break
+
+        self._change_check_cache[repo_name] = (last_indexed_ts, now, changed)
+        return changed
 
     def _verify_index_data_exists(self, repo_name: str) -> bool:
         """Verify that indexed data actually exists in the database."""
@@ -291,12 +332,11 @@ class IndexerService:
                 return self._incremental_update(repo_name, repo_path)
             else:
                 logger.debug(f"No files changed for {repo_name}, skipping update")
-                file_count, chunk_count = self._get_stats(repo_name)
                 return IndexResult(
                     repo_name=repo_name,
                     status="unchanged",
-                    file_count=file_count,
-                    chunk_count=chunk_count,
+                    file_count=repo.file_count,
+                    chunk_count=repo.chunk_count,
                 )
 
         # Path changed - re-index

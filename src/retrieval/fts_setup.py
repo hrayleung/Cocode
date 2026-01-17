@@ -8,8 +8,12 @@ Creates a text search configuration optimized for source code that:
 
 from src.storage.postgres import get_connection
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
+
+_code_text_search_ready: bool | None = None
+_code_text_search_lock = threading.Lock()
 
 
 # SQL to create a code-aware text search configuration
@@ -91,25 +95,34 @@ def create_code_text_search_config() -> bool:
     Returns:
         True if successful
     """
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                # Create the code text search configuration
-                cur.execute(CREATE_CODE_TS_CONFIG)
+    global _code_text_search_ready
+    if _code_text_search_ready is not None:
+        return _code_text_search_ready
 
-                # Create the normalization function
-                cur.execute(CREATE_CODE_NORMALIZE_FUNC)
+    with _code_text_search_lock:
+        if _code_text_search_ready is not None:
+            return _code_text_search_ready
+        try:
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    # Create the code text search configuration
+                    cur.execute(CREATE_CODE_TS_CONFIG)
 
-                # Create the enhanced tsvector function
-                cur.execute(CREATE_CODE_TSVECTOR_FUNC)
+                    # Create the normalization function
+                    cur.execute(CREATE_CODE_NORMALIZE_FUNC)
 
-            conn.commit()
-            logger.info("Created code text search configuration")
-            return True
+                    # Create the enhanced tsvector function
+                    cur.execute(CREATE_CODE_TSVECTOR_FUNC)
 
-    except Exception as e:
-        logger.error(f"Failed to create code text search config: {e}")
-        return False
+                conn.commit()
+                logger.info("Created code text search configuration")
+                _code_text_search_ready = True
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to create code text search config: {e}")
+            _code_text_search_ready = False
+            return False
 
 
 def add_code_fts_to_table(table_name: str) -> bool:
