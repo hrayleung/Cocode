@@ -106,7 +106,7 @@ class RepoManager:
                 params = [status]
 
                 if status == "ready":
-                    updates.append("last_indexed = CURRENT_TIMESTAMP")
+                    updates.append("last_indexed = (NOW() AT TIME ZONE 'UTC')")
 
                 if file_count is not None:
                     updates.append("file_count = %s")

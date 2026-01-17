@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import cocoindex
@@ -214,23 +215,49 @@ class IndexerService:
         if not (repo and repo.last_indexed):
             return False
 
-        last_indexed_ts = repo.last_indexed.timestamp()
+        last_indexed_ts = self._datetime_to_timestamp(repo.last_indexed)
         now = time.monotonic()
 
         cached = self._change_check_cache.get(repo_name)
         if cached and cached[0] == last_indexed_ts and (now - cached[1]) < 5.0:
             return cached[2]
 
-        repo_path_obj = Path(repo_path)
+        changed = False
+        for full_path, relative_path in self._iter_relevant_files(repo_path):
+            try:
+                if full_path.stat().st_mtime > last_indexed_ts:
+                    logger.debug(f"Modified file detected: {relative_path}")
+                    changed = True
+                    break
+            except OSError:
+                changed = True
+                break
 
+        self._change_check_cache[repo_name] = (last_indexed_ts, now, changed)
+        return changed
+
+    @staticmethod
+    def _datetime_to_timestamp(value: datetime) -> float:
+        """Convert datetime to a stable POSIX timestamp.
+
+        The repos table stores timestamps without timezone. Treat naive values as UTC to
+        avoid repeated incremental updates on systems where the DB/session timezone
+        differs from the local runtime.
+        """
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc).timestamp()
+        return value.timestamp()
+
+    def _iter_relevant_files(self, repo_path: str):
+        """Yield (full_path, relative_path_str) for index-relevant files in a repo."""
+        repo_path_obj = Path(repo_path)
         excluded_patterns = settings.excluded_patterns
         included_extensions = {ext.lower() for ext in settings.included_extensions}
 
-        # Walk and prune excluded directories to avoid scanning huge trees.
-        changed = False
         for root, dirnames, filenames in os.walk(repo_path, topdown=True):
             dirnames[:] = [
-                d for d in dirnames
+                d
+                for d in dirnames
                 if not d.startswith(".") and not _matches_any_pattern(d, excluded_patterns)
             ]
 
@@ -248,25 +275,21 @@ class IndexerService:
                 except ValueError:
                     continue
 
-                # Match historical behavior: exclude any path containing an excluded part.
                 if any(_matches_any_pattern(part, excluded_patterns) for part in relative_path.parts):
                     continue
 
-                try:
-                    if full_path.stat().st_mtime > last_indexed_ts:
-                        logger.debug(f"Modified file detected: {relative_path}")
-                        changed = True
-                        break
-                except OSError:
-                    # File might have been deleted/moved mid-walk; trigger re-index.
-                    changed = True
-                    break
+                yield full_path, str(relative_path)
 
-            if changed:
-                break
-
-        self._change_check_cache[repo_name] = (last_indexed_ts, now, changed)
-        return changed
+    def _get_modified_files(self, repo_path: str, last_indexed_ts: float) -> list[str]:
+        """Return relative paths of relevant files modified since last_indexed_ts."""
+        modified: list[str] = []
+        for full_path, relative_path in self._iter_relevant_files(repo_path):
+            try:
+                if full_path.stat().st_mtime > last_indexed_ts:
+                    modified.append(relative_path)
+            except OSError:
+                modified.append(relative_path)
+        return modified
 
     def _verify_index_data_exists(self, repo_name: str) -> bool:
         """Verify that indexed data actually exists in the database."""
@@ -403,6 +426,14 @@ class IndexerService:
         try:
             self._init_cocoindex()
 
+            repo = self._repo_manager.get_repo(repo_name)
+            last_indexed_ts = (
+                self._datetime_to_timestamp(repo.last_indexed)
+                if repo and repo.last_indexed
+                else 0.0
+            )
+            modified_files = self._get_modified_files(repo_path, last_indexed_ts)
+
             flow = create_indexing_flow(repo_name, repo_path)
 
             # CocoIndex manages its own DB connections - no transaction wrapper needed
@@ -414,9 +445,39 @@ class IndexerService:
 
             # Keep symbol index in sync with chunk index.
             try:
-                from src.indexer.symbol_indexing import index_repository_symbols
+                if settings.enable_symbol_indexing and modified_files:
+                    from src.embeddings.provider import get_provider
+                    from src.indexer.symbol_indexing import (
+                        create_symbols_table,
+                        delete_file_symbols,
+                        index_file_symbols,
+                    )
 
-                index_repository_symbols(repo_name, repo_path)
+                    create_symbols_table(repo_name, settings.embedding_dimensions)
+                    embedding_provider = get_provider()
+                    repo_root = Path(repo_path)
+
+                    for relative_path in sorted(set(modified_files)):
+                        try:
+                            file_path = repo_root / relative_path
+                            if not file_path.is_file():
+                                delete_file_symbols(repo_name, relative_path)
+                                continue
+
+                            try:
+                                content = file_path.read_text(encoding="utf-8")
+                            except Exception:
+                                continue
+
+                            delete_file_symbols(repo_name, relative_path)
+                            index_file_symbols(
+                                repo_name,
+                                relative_path,
+                                content,
+                                embedding_provider=embedding_provider,
+                            )
+                        except Exception:
+                            continue
             except Exception as e:
                 logger.warning(f"Symbol indexing failed for {repo_name}: {e}")
 
@@ -430,6 +491,10 @@ class IndexerService:
                 file_count=file_count,
                 chunk_count=chunk_count
             )
+
+            # Clear stale graph cache before recomputing centrality
+            from src.retrieval.graph_cache import clear_graph_cache
+            clear_graph_cache(repo_name)
 
             self._compute_centrality(repo_name)
 
