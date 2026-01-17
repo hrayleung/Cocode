@@ -32,6 +32,17 @@ class JinaProvider:
         return get_embeddings_batch(texts, use_late_chunking=True)
 
 
+class MistralProvider:
+    """Mistral Codestral Embed provider."""
+    def get_embedding(self, text: str) -> list[float]:
+        from src.embeddings.mistral import get_embedding
+        return get_embedding(text)
+
+    def get_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
+        from src.embeddings.mistral import get_embeddings_batch
+        return get_embeddings_batch(texts)
+
+
 _provider: EmbeddingProvider | None = None
 _provider_lock = threading.Lock()
 
@@ -44,7 +55,6 @@ def get_provider() -> EmbeddingProvider:
 
     with _provider_lock:
         if _provider is None:
-            from src.embeddings.backend import should_use_jina
-
-            _provider = JinaProvider() if should_use_jina() else OpenAIProvider()
+            from src.embeddings.backend import get_embedding_provider
+            _provider = get_embedding_provider()
     return _provider

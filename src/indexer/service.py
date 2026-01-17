@@ -1,5 +1,6 @@
 """Indexer service - handles all codebase indexing operations."""
 
+import fnmatch
 import logging
 import os
 import threading
@@ -18,6 +19,11 @@ from src.retrieval.centrality import compute_and_store_centrality, delete_centra
 from src.retrieval.vector_search import get_chunks_table_name
 
 logger = logging.getLogger(__name__)
+
+
+def _matches_any_pattern(name: str, patterns: list[str]) -> bool:
+    """Check if a name matches any of the given fnmatch patterns."""
+    return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
 
 
 @dataclass
@@ -151,7 +157,6 @@ class IndexerService:
 
     def _get_indexed_files(self, repo_name: str, repo_path: Path) -> tuple[set[str], set[str]]:
         """Get indexed files from DB and current files on disk."""
-        import fnmatch
         from src.storage.postgres import get_connection
 
         table_name = get_chunks_table_name(repo_name)
@@ -167,13 +172,14 @@ class IndexerService:
                 stored_files = {row[0] for row in cur.fetchall()}
 
         # Get current files on disk
+        excluded_patterns = settings.excluded_patterns
+
         def is_excluded(file_path: Path) -> bool:
             """Check if a file path matches any excluded pattern."""
-            for part in file_path.parts:
-                for pattern in settings.excluded_patterns:
-                    if fnmatch.fnmatch(part, pattern):
-                        return True
-            return False
+            return any(
+                _matches_any_pattern(part, excluded_patterns)
+                for part in file_path.parts
+            )
 
         current_files = set()
         for file_path in repo_path.rglob("*"):
@@ -204,8 +210,6 @@ class IndexerService:
 
         Deleted files are not detected (stale index entries persist until the next update).
         """
-        import fnmatch
-
         repo = self._repo_manager.get_repo(repo_name)
         if not (repo and repo.last_indexed):
             return False
@@ -222,19 +226,16 @@ class IndexerService:
         excluded_patterns = settings.excluded_patterns
         included_extensions = {ext.lower() for ext in settings.included_extensions}
 
-        def is_excluded_part(name: str) -> bool:
-            return any(fnmatch.fnmatch(name, pattern) for pattern in excluded_patterns)
-
         # Walk and prune excluded directories to avoid scanning huge trees.
         changed = False
         for root, dirnames, filenames in os.walk(repo_path, topdown=True):
             dirnames[:] = [
                 d for d in dirnames
-                if not d.startswith(".") and not is_excluded_part(d)
+                if not d.startswith(".") and not _matches_any_pattern(d, excluded_patterns)
             ]
 
             for filename in filenames:
-                if filename.startswith(".") or is_excluded_part(filename):
+                if filename.startswith(".") or _matches_any_pattern(filename, excluded_patterns):
                     continue
 
                 ext = os.path.splitext(filename)[1].lower()
@@ -248,7 +249,7 @@ class IndexerService:
                     continue
 
                 # Match historical behavior: exclude any path containing an excluded part.
-                if any(is_excluded_part(part) for part in relative_path.parts):
+                if any(_matches_any_pattern(part, excluded_patterns) for part in relative_path.parts):
                     continue
 
                 try:

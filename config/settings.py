@@ -57,6 +57,13 @@ class Settings:
     jina_model: str = field(default_factory=lambda: os.getenv("JINA_MODEL", "jina-embeddings-v3"))
     use_late_chunking: bool = field(default_factory=lambda: os.getenv("USE_LATE_CHUNKING", "true").lower() == "true")
 
+    # Mistral (Codestral Embed)
+    mistral_api_key: str = field(default_factory=lambda: os.getenv("MISTRAL_API_KEY", ""))
+    mistral_embed_model: str = field(default_factory=lambda: os.getenv("MISTRAL_EMBED_MODEL", "codestral-embed"))
+
+    # Embedding provider selection: "jina", "mistral", or "openai"
+    embedding_provider: str = field(default_factory=lambda: os.getenv("EMBEDDING_PROVIDER", "jina"))
+
     # Cohere (reranking)
     cohere_api_key: str = field(default_factory=lambda: os.getenv("COHERE_API_KEY", ""))
     rerank_model: str = field(default_factory=lambda: os.getenv("RERANK_MODEL", "rerank-v3.5"))

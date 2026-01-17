@@ -124,14 +124,19 @@ All tables defined in `src/storage/schema.py`:
 
 ### Embedding Strategies
 
-**OpenAI** (default): Chunks prepended with contextual header:
+**Provider Selection** (via `EMBEDDING_PROVIDER` env var):
+- `jina` (default): Jina late chunking - full document embeddings with chunk extraction, preserving cross-chunk context (~24% retrieval improvement)
+- `mistral`: Codestral Embed - optimized for code embeddings
+- `openai`: OpenAI text-embedding-3-large with contextual headers
+
+All providers validate API keys on startup and fall back to OpenAI if validation fails.
+
+**Contextual Headers** (OpenAI): Chunks prepended with:
 ```
 # File: {filename}
 # Language: {language}
 # Location: {location}
 ```
-
-**Jina Late Chunking** (if `JINA_API_KEY` set): Full document embeddings with chunk extraction, preserving cross-chunk context (~24% retrieval improvement over standard chunking).
 
 ### Symbol Extraction and AST Parsing
 
@@ -221,8 +226,12 @@ Computes PageRank scores from import relationships to identify structurally impo
 ## Environment Variables
 
 Required (one of):
-- `OPENAI_API_KEY` - For OpenAI embeddings
-- `JINA_API_KEY` + `USE_LATE_CHUNKING=true` - For Jina late chunking
+- `OPENAI_API_KEY` - For OpenAI embeddings (fallback)
+
+Embedding Provider (choose one):
+- `JINA_API_KEY` - For Jina late chunking embeddings
+- `MISTRAL_API_KEY` - For Mistral Codestral Embed
+- `EMBEDDING_PROVIDER` - Select provider: `jina`, `mistral`, or `openai` (default: `jina`)
 
 Database:
 - `COCOINDEX_DATABASE_URL` - PostgreSQL with pgvector (default: `postgresql://localhost:5432/cocode`)

@@ -15,6 +15,25 @@ from src.storage.schema import sanitize_repo_name
 logger = logging.getLogger(__name__)
 
 
+def _format_symbol_content(
+    signature: str,
+    docstring: str | None,
+    parent_symbol: str | None,
+) -> str:
+    """Format symbol signature and docstring into content for search results."""
+    parts = []
+    if parent_symbol:
+        parts.append(f"class {parent_symbol}:")
+
+    parts.append(f"    {signature}" if parent_symbol else signature)
+
+    if docstring:
+        doc_preview = docstring[:200] + "..." if len(docstring) > 200 else docstring
+        parts.append(f'    """{doc_preview}"""')
+
+    return "\n".join(parts)
+
+
 def symbol_vector_search(
     repo_name: str,
     query: str,
@@ -73,28 +92,11 @@ def symbol_vector_search(
     for row in rows:
         filename, symbol_name, symbol_type, line_start, line_end, signature, docstring, parent_symbol, visibility, category, similarity = row
 
-        # Create location string in format "line_start:line_end"
-        location = f"{line_start}:{line_end}"
-
-        # Create content showing symbol signature
-        content_parts = []
-        if parent_symbol:
-            content_parts.append(f"class {parent_symbol}:")
-
-        content_parts.append(f"    {signature}" if parent_symbol else signature)
-
-        if docstring:
-            # Add truncated docstring
-            doc_preview = docstring[:200] + "..." if len(docstring) > 200 else docstring
-            content_parts.append(f'    """{doc_preview}"""')
-
-        content = "\n".join(content_parts)
-
         results.append(
             SearchResult(
                 filename=filename,
-                location=location,
-                content=content,
+                location=f"{line_start}:{line_end}",
+                content=_format_symbol_content(signature, docstring, parent_symbol),
                 score=float(similarity),
             )
         )
@@ -154,26 +156,11 @@ def symbol_bm25_search(
     for row in rows:
         filename, symbol_name, symbol_type, line_start, line_end, signature, docstring, parent_symbol, visibility, category, rank = row
 
-        location = f"{line_start}:{line_end}"
-
-        # Create content
-        content_parts = []
-        if parent_symbol:
-            content_parts.append(f"class {parent_symbol}:")
-
-        content_parts.append(f"    {signature}" if parent_symbol else signature)
-
-        if docstring:
-            doc_preview = docstring[:200] + "..." if len(docstring) > 200 else docstring
-            content_parts.append(f'    """{doc_preview}"""')
-
-        content = "\n".join(content_parts)
-
         results.append(
             SearchResult(
                 filename=filename,
-                location=location,
-                content=content,
+                location=f"{line_start}:{line_end}",
+                content=_format_symbol_content(signature, docstring, parent_symbol),
                 score=float(rank),
             )
         )

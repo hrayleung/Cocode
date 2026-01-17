@@ -4,6 +4,7 @@ import logging
 import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import Callable
 
 from config.settings import settings
@@ -99,27 +100,31 @@ def reciprocal_rank_fusion(
     ]
 
 
+@dataclass
+class SearchOutcome:
+    """Result of a search backend execution."""
+    results: list[SearchResult] = field(default_factory=list)
+    failed: bool = False
+    attempted: bool = True
+
+
 def _execute_search(
     search_fn: Callable[[], list[SearchResult]],
     name: str,
-) -> tuple[list[SearchResult], bool]:
-    """Execute a search function with error handling.
-
-    Returns:
-        Tuple of (results, failed) where failed is True if the search raised an exception.
-    """
+) -> SearchOutcome:
+    """Execute a search function with error handling."""
     try:
-        return search_fn(), False
+        return SearchOutcome(results=search_fn())
     except Exception as e:
         logger.warning(f"{name} search failed: {e}")
-        return [], True
+        return SearchOutcome(failed=True)
 
 
 def _run_searches_parallel(
     vector_fn: Callable[[], list[SearchResult]],
     bm25_fn: Callable[[], list[SearchResult]],
     symbol_fn: Callable[[], list[SearchResult]] | None = None,
-) -> tuple[list[SearchResult], list[SearchResult], list[SearchResult], bool, bool, bool]:
+) -> tuple[SearchOutcome, SearchOutcome, SearchOutcome]:
     """Run vector, BM25, and symbol searches in parallel."""
     max_workers = 3 if symbol_fn else 2
 
@@ -128,30 +133,30 @@ def _run_searches_parallel(
         future_bm25 = executor.submit(bm25_fn)
         future_symbol = executor.submit(symbol_fn) if symbol_fn else None
 
-        vector_results, vector_failed = [], False
-        bm25_results, bm25_failed = [], False
-        symbol_results, symbol_failed = [], False
+        vector = SearchOutcome()
+        bm25 = SearchOutcome()
+        symbol = SearchOutcome(attempted=symbol_fn is not None)
 
         try:
-            vector_results = future_vector.result(timeout=30)
+            vector.results = future_vector.result(timeout=30)
         except Exception as e:
             logger.warning(f"Vector search failed: {e}")
-            vector_failed = True
+            vector.failed = True
 
         try:
-            bm25_results = future_bm25.result(timeout=30)
+            bm25.results = future_bm25.result(timeout=30)
         except Exception as e:
             logger.warning(f"BM25 search failed: {e}")
-            bm25_failed = True
+            bm25.failed = True
 
         if future_symbol:
             try:
-                symbol_results = future_symbol.result(timeout=30)
+                symbol.results = future_symbol.result(timeout=30)
             except Exception as e:
                 logger.warning(f"Symbol search failed: {e}")
-                symbol_failed = True
+                symbol.failed = True
 
-    return vector_results, bm25_results, symbol_results, vector_failed, bm25_failed, symbol_failed
+    return vector, bm25, symbol
 
 
 def hybrid_search(
@@ -234,43 +239,45 @@ def hybrid_search(
         )
 
     if parallel:
-        vector_results, bm25_results, symbol_results, vector_failed, bm25_failed, symbol_failed = _run_searches_parallel(
+        vector, bm25, symbol = _run_searches_parallel(
             run_vector, run_bm25, run_symbol if symbols_attempted else None
         )
-        if not symbols_attempted:
-            symbol_results, symbol_failed = [], None  # None means not attempted
     else:
         logger.debug(f"Running vector search for '{query}' in {repo_name}")
-        vector_results, vector_failed = _execute_search(run_vector, "Vector")
+        vector = _execute_search(run_vector, "Vector")
         logger.debug(f"Running BM25 search for '{query}' in {repo_name}")
-        bm25_results, bm25_failed = _execute_search(run_bm25, "BM25")
+        bm25 = _execute_search(run_bm25, "BM25")
         if symbols_attempted:
             logger.debug(f"Running symbol search for '{query}' in {repo_name}")
-            symbol_results, symbol_failed = _execute_search(run_symbol, "Symbol")
+            symbol = _execute_search(run_symbol, "Symbol")
         else:
-            symbol_results, symbol_failed = [], None  # None means not attempted
+            symbol = SearchOutcome(attempted=False)
 
     # Check if all attempted backends failed
-    all_failed = (vector_failed and bm25_failed and symbol_failed) if symbols_attempted else (vector_failed and bm25_failed)
+    attempted_backends = [vector, bm25]
+    if symbol.attempted:
+        attempted_backends.append(symbol)
+
+    all_failed = all(b.failed for b in attempted_backends)
 
     if all_failed:
         raise SearchError("All search backends failed")
-    if vector_failed:
+    if vector.failed:
         logger.warning("Vector search failed, using BM25/symbol-only results")
-    if bm25_failed:
+    if bm25.failed:
         logger.warning("BM25 search failed, using vector/symbol-only results")
-    if symbols_attempted and symbol_failed:
+    if symbol.attempted and symbol.failed:
         logger.warning("Symbol search failed, using vector/BM25-only results")
 
-    logger.info(f"Search results: vector={len(vector_results)}, bm25={len(bm25_results)}, symbol={len(symbol_results)}")
+    logger.info(f"Search results: vector={len(vector.results)}, bm25={len(bm25.results)}, symbol={len(symbol.results)}")
 
     # Prepare result lists and weights for RRF
-    result_lists = [vector_results, bm25_results]
+    result_lists = [vector.results, bm25.results]
     weights = [vec_weight, bm_weight]
 
     # Add symbol results if available
-    if symbols_attempted and symbol_results:
-        result_lists.append(symbol_results)
+    if symbol.attempted and symbol.results:
+        result_lists.append(symbol.results)
         weights.append(sym_weight)
 
     fused_results = reciprocal_rank_fusion(result_lists, weights=weights)

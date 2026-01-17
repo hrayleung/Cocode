@@ -64,6 +64,42 @@ class JinaEmbedExecutor:
         return data["data"][0]["embedding"]
 
 
+class MistralEmbedSpec(cocoindex.op.FunctionSpec):
+    """Spec for Mistral Codestral Embed function."""
+
+    model: str = "codestral-embed"
+
+
+@cocoindex.op.executor_class(cache=True, behavior_version=1)
+class MistralEmbedExecutor:
+    """Executor for Mistral Codestral Embed."""
+    spec: MistralEmbedSpec
+    client: Any
+
+    def prepare(self) -> None:
+        """Initialize the HTTP client."""
+        self.client = httpx.Client(timeout=120.0)
+        self.api_key = settings.mistral_api_key
+        self.api_url = "https://api.mistral.ai/v1/embeddings"
+
+    def __call__(self, text: str) -> cocoindex.Vector[cocoindex.Float32, Literal[1024]]:
+        """Embed a single text chunk."""
+        response = self.client.post(
+            self.api_url,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.spec.model,
+                "input": [text],
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["data"][0]["embedding"][:1024]  # Truncate to 1024 dims
+
+
 # Map file extensions to tree-sitter language names
 EXTENSION_TO_LANGUAGE = {
     # Code files
@@ -159,6 +195,14 @@ def text_to_embedding_jina(
     )
 
 
+@cocoindex.transform_flow()
+def text_to_embedding_mistral(
+    text: cocoindex.DataSlice[str]
+) -> cocoindex.DataSlice[cocoindex.Vector[cocoindex.Float32, Literal[1024]]]:
+    """Transform text to embeddings using Mistral Codestral Embed."""
+    return text.transform(MistralEmbedSpec(model=settings.mistral_embed_model))
+
+
 def create_indexing_flow(
     repo_name: str,
     repo_path: str,
@@ -211,14 +255,17 @@ def create_indexing_flow(
         data_scope: cocoindex.DataScope,
     ):
         # Select embedding function based on configuration
-        # Note: should_use_jina() makes a network validation call, so cache the result
-        from src.embeddings.backend import should_use_jina
+        from src.embeddings.backend import get_selected_provider
 
-        use_jina = should_use_jina()
-        embed_fn = text_to_embedding_jina if use_jina else text_to_embedding_openai
-        if use_jina:
+        provider = get_selected_provider()
+        if provider == "mistral":
+            embed_fn = text_to_embedding_mistral
+            logger.info("Using Mistral Codestral Embed")
+        elif provider == "jina":
+            embed_fn = text_to_embedding_jina
             logger.info("Using Jina embeddings with late chunking")
         else:
+            embed_fn = text_to_embedding_openai
             logger.info("Using OpenAI embeddings")
 
         # Source: read files from repository

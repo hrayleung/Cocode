@@ -6,6 +6,7 @@ expand search results with contextually related files.
 
 import logging
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -354,11 +355,9 @@ def get_related_files(
         return []
 
     # Build reverse graph (imported_by)
-    reverse_graph: dict[str, list[str]] = {}
+    reverse_graph: dict[str, list[str]] = defaultdict(list)
     for source, targets in import_graph.items():
         for target in targets:
-            if target not in reverse_graph:
-                reverse_graph[target] = []
             reverse_graph[target].append(source)
 
     # Perform multi-hop BFS traversal
