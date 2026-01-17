@@ -6,19 +6,12 @@ from typing import Protocol
 
 class EmbeddingProvider(Protocol):
     """Protocol for embedding providers."""
-
-    def get_embedding(self, text: str) -> list[float]:
-        """Get embedding for a single text."""
-        ...
-
-    def get_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
-        """Get embeddings for multiple texts."""
-        ...
+    def get_embedding(self, text: str) -> list[float]: ...
+    def get_embeddings_batch(self, texts: list[str]) -> list[list[float]]: ...
 
 
 class OpenAIProvider:
     """OpenAI embedding provider."""
-
     def get_embedding(self, text: str) -> list[float]:
         from src.embeddings.openai import get_embedding
         return get_embedding(text)
@@ -29,8 +22,7 @@ class OpenAIProvider:
 
 
 class JinaProvider:
-    """Jina embedding provider with late chunking support."""
-
+    """Jina embedding provider with late chunking."""
     def get_embedding(self, text: str) -> list[float]:
         from src.embeddings.jina import get_embedding
         return get_embedding(text)
@@ -53,8 +45,5 @@ def get_provider() -> EmbeddingProvider:
     with _provider_lock:
         if _provider is None:
             from config.settings import settings
-            if settings.use_late_chunking and settings.jina_api_key:
-                _provider = JinaProvider()
-            else:
-                _provider = OpenAIProvider()
+            _provider = JinaProvider() if (settings.use_late_chunking and settings.jina_api_key) else OpenAIProvider()
     return _provider

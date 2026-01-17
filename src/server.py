@@ -1,7 +1,4 @@
-"""FastMCP server for semantic code search.
-
-Provides a single tool for searching codebases with automatic indexing.
-"""
+"""FastMCP server for semantic code search."""
 
 import logging
 import os
@@ -9,35 +6,28 @@ import signal
 import sys
 from pathlib import Path
 
-# Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastmcp import FastMCP
-from config.settings import settings
 
-from src.storage.postgres import close_pool, init_db
+from config.settings import settings
 from src.exceptions import IndexingError, PathError, SearchError
 from src.indexer.service import get_indexer
 from src.retrieval.service import get_searcher
+from src.storage.postgres import close_pool, init_db
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# Bounds for top_k parameter
 MIN_TOP_K = 1
 MAX_TOP_K = 100
 
-# Initialize FastMCP server
 mcp = FastMCP(
     "cocode",
-    instructions="""Semantic code search for your codebase.
-
-Call codebase_retrieval with your question - indexing happens automatically.
-Works with any programming language. Uses hybrid vector + keyword search.""",
+    instructions="Semantic code search. Call codebase_retrieval with your question - indexing is automatic.",
 )
 
 
@@ -49,55 +39,34 @@ async def codebase_retrieval(
 ) -> list[dict]:
     """Search a codebase using semantic and keyword search.
 
-    Indexing happens automatically on first use and updates incrementally
-    on subsequent calls to catch any file changes.
-
     Args:
         query: Natural language question about the code
-               Examples: "how does authentication work",
-                        "where is the database connection handled",
-                        "error handling in API routes"
-        path: Path to the codebase (defaults to current working directory)
-        top_k: Number of files to return (default: 10, max: 100)
-               - Use 3-5 for focused queries targeting specific functions/classes
-               - Use 10-15 for understanding a feature or subsystem
-               - Use 20-30 for broad exploration or finding all related code
-               Internally searches 3x this number and aggregates by file.
+        path: Path to the codebase (defaults to cwd)
+        top_k: Number of files to return (1-100, default: 10)
 
     Returns:
         List of relevant code snippets with filename, content, and score
     """
-    # Validate inputs
     if not query or not query.strip():
         return [{"error": "Query cannot be empty"}]
-
-    # Validate top_k bounds
     if top_k < MIN_TOP_K:
-        return [{"error": f"top_k must be at least {MIN_TOP_K}, got {top_k}"}]
+        return [{"error": f"top_k must be at least {MIN_TOP_K}"}]
     if top_k > MAX_TOP_K:
-        return [{"error": f"top_k cannot exceed {MAX_TOP_K}, got {top_k}"}]
+        return [{"error": f"top_k cannot exceed {MAX_TOP_K}"}]
 
-    # Default to current directory
     if path is None:
         path = os.getcwd()
 
     try:
-        # Ensure codebase is indexed
         indexer = get_indexer()
         index_result = indexer.ensure_indexed(path)
 
-        logger.info(
-            f"Index status: {index_result.status} "
-            f"({index_result.file_count} files, {index_result.chunk_count} chunks)"
-        )
+        logger.info(f"Index: {index_result.status} ({index_result.file_count} files, {index_result.chunk_count} chunks)")
 
-        # Check if indexing produced any chunks
         if index_result.chunk_count == 0:
-            return [{"error": f"No code files found to index in {path}"}]
+            return [{"error": f"No code files found in {path}"}]
 
-        # Search
-        searcher = get_searcher()
-        results = searcher.search(
+        results = get_searcher().search(
             repo_name=index_result.repo_name,
             query=query.strip(),
             top_k=top_k,
@@ -113,15 +82,12 @@ async def codebase_retrieval(
     except PathError as e:
         logger.warning(f"Path error: {e}")
         return [{"error": str(e)}]
-
     except IndexingError as e:
         logger.error(f"Indexing error: {e}")
-        return [{"error": f"Failed to index codebase: {e}"}]
-
+        return [{"error": f"Failed to index: {e}"}]
     except SearchError as e:
         logger.error(f"Search error: {e}")
         return [{"error": f"Search failed: {e}"}]
-
     except Exception as e:
         logger.exception(f"Unexpected error: {e}")
         return [{"error": f"Unexpected error: {e}"}]
@@ -129,16 +95,13 @@ async def codebase_retrieval(
 
 @mcp.tool()
 async def clear_index(path: str | None = None) -> dict:
-    """Clear the index for a codebase.
-
-    Use this to delete the existing index and force a fresh re-index
-    on the next search. Useful when changing indexing settings.
+    """Clear the index for a codebase to force re-indexing.
 
     Args:
-        path: Path to the codebase (defaults to current working directory)
+        path: Path to the codebase (defaults to cwd)
 
     Returns:
-        Status message confirming the index was cleared
+        Status message
     """
     if path is None:
         path = os.getcwd()
@@ -148,7 +111,7 @@ async def clear_index(path: str | None = None) -> dict:
         resolved_path = Path(path).resolve()
 
         if not resolved_path.exists() or not resolved_path.is_dir():
-            return {"error": f"Path does not exist or is not a directory: {path}"}
+            return {"error": f"Invalid path: {path}"}
 
         repo_name = indexer.resolve_repo_name(resolved_path)
         indexer._delete_index(repo_name)
@@ -156,9 +119,8 @@ async def clear_index(path: str | None = None) -> dict:
         return {
             "status": "cleared",
             "path": str(resolved_path),
-            "message": f"Index cleared. Next search will rebuild the index.",
+            "message": "Index cleared. Next search will rebuild.",
         }
-
     except Exception as e:
         logger.error(f"Failed to clear index: {e}")
         return {"error": f"Failed to clear index: {e}"}
@@ -168,14 +130,8 @@ def main() -> None:
     """Main entry point for MCP server."""
     logger.info("Starting cocode MCP server...")
 
-    has_openai = bool(settings.openai_api_key)
-    has_jina = bool(settings.jina_api_key) and settings.use_late_chunking
-
-    if not has_openai and not has_jina:
-        logger.error(
-            "Either OPENAI_API_KEY or JINA_API_KEY (with USE_LATE_CHUNKING=true) is required. "
-            "Set it in your environment or .env file."
-        )
+    if not settings.openai_api_key and not (settings.jina_api_key and settings.use_late_chunking):
+        logger.error("OPENAI_API_KEY or JINA_API_KEY (with USE_LATE_CHUNKING=true) required")
         sys.exit(1)
 
     try:

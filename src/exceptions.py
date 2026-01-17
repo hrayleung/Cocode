@@ -2,25 +2,20 @@
 
 
 class CocodeError(Exception):
-    """Base exception for cocode errors."""
-    pass
+    """Base exception."""
 
 
 class IndexingError(CocodeError):
-    """Error during indexing."""
-    pass
+    """Indexing error."""
 
 
 class SearchError(CocodeError):
-    """Error during search."""
-    pass
+    """Search error."""
 
 
 class ConfigurationError(CocodeError):
-    """Error in configuration."""
-    pass
+    """Configuration error."""
 
 
 class PathError(CocodeError):
-    """Error with file path."""
-    pass
+    """File path error."""

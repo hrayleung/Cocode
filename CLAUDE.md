@@ -54,11 +54,12 @@ The search pipeline applies multiple ranking strategies in sequence. **Critical*
 ```
 Query → get_query_embedding() [Jina if available, else OpenAI]
          ↓
-       [Parallel ThreadPoolExecutor]
-       ├─ vector_search() (pgvector cosine similarity)
-       └─ bm25_search() (PostgreSQL FTS with ts_rank_cd)
+       [Parallel ThreadPoolExecutor - max_workers=3]
+       ├─ vector_search() (pgvector cosine similarity on chunks)
+       ├─ bm25_search() (PostgreSQL FTS with ts_rank_cd on chunks)
+       └─ symbol_search() (vector + BM25 on functions/classes/methods)
          ↓
-       reciprocal_rank_fusion() [weights: vector=0.6, bm25=0.4]
+       reciprocal_rank_fusion() [weights: vector=0.6, bm25=0.4, symbol=0.7]
          ↓
        apply_centrality_boost() [PageRank-based structural importance]
          ↓
@@ -68,11 +69,12 @@ Query → get_query_embedding() [Jina if available, else OpenAI]
          ↓
        aggregate_by_file() [group chunks, keep top 3 per file]
          ↓
-       expand_with_graph() [adds related files via import parsing]
+       expand_with_graph() [adds related files via multi-hop import traversal (up to 3 hops)]
 ```
 
-Core ranking pipeline: `src/retrieval/hybrid.py:200-227` (RRF → centrality → category → rerank)
-Post-processing: `src/retrieval/service.py:163-184` (aggregate → graph expansion)
+Core ranking pipeline: `src/retrieval/hybrid.py:160-257` (RRF → centrality → category → rerank)
+Symbol search: `src/retrieval/symbol_search.py` (vector + BM25 on symbols)
+Post-processing: `src/retrieval/service.py:117-193` (aggregate → graph expansion)
 
 ### Database Tables
 
@@ -92,6 +94,31 @@ All tables defined in `src/storage/schema.py`:
 - Timestamps: created_at, updated_at
 - Additional index on filename for efficient file lookups
 
+**{schema}.symbols table** (per-repo, enabled by default):
+- Symbol metadata: symbol_name, symbol_type (function/class/method), signature, docstring
+- Location: filename, line_start, line_end (precise line numbers)
+- Context: parent_symbol (for methods), visibility (public/private/internal), category (implementation/test/api/config)
+- Search indexes:
+  - `embedding` (vector) + HNSW index for semantic symbol search
+  - `content_tsv` (tsvector) + GIN index for BM25 full-text search on symbols
+- Unique constraint: (filename, symbol_name, line_start) for UPSERT support
+- Timestamps: created_at, updated_at
+
+**{schema}.edges table** (per-repo, for call graph):
+- Stores function call relationships (caller → callee)
+- Fields: source_symbol_id, target_symbol_id (nullable), edge_type ('calls', 'implements', etc.)
+- Location tracking: source_file, source_line, target_file, target_line
+- Confidence scores: 1.0=exact match, 0.7=partial, 0.5=unresolved
+- Context: 'loop', 'conditional', 'recursive', etc.
+- Indexes on source_symbol_id, target_symbol_id, edge_type, (source_file, target_file)
+- CASCADE deletion when symbols are deleted
+
+**{schema}.graph_cache table** (per-repo, for performance):
+- Caches pre-computed import graphs to avoid rebuilding on every search
+- Fields: filename (PK), imports (JSONB), imported_by (JSONB), symbol_count, edge_count
+- Invalidated when files change during incremental indexing
+- 30-50% faster graph queries via caching
+
 **{repo}_centrality table** (optional, created on-demand):
 - Per-repo PageRank scores for graph-based boosting
 
@@ -105,6 +132,27 @@ All tables defined in `src/storage/schema.py`:
 ```
 
 **Jina Late Chunking** (if `JINA_API_KEY` set): Full document embeddings with chunk extraction, preserving cross-chunk context (~24% retrieval improvement over standard chunking).
+
+### Symbol Extraction and AST Parsing
+
+**Symbol Indexing** (`src/indexer/symbol_indexing.py`):
+- Extracts functions, classes, and methods from code files
+- Uses Tree-sitter AST parsing for accurate extraction (Python, Go, Rust, C/C++, JavaScript, TypeScript)
+- Generates embeddings for symbols (signature + docstring + context)
+- Stores with precise line numbers (line_start, line_end) for exact code references
+- Enabled by default via `ENABLE_SYMBOL_INDEXING=true`
+
+**AST-based Import Parsing** (`src/parser/ast_parser.py`):
+- Replaces regex-based import extraction with Tree-sitter AST parsing
+- Handles edge cases: dynamic imports, conditional imports, aliased imports, nested structures
+- Falls back to regex if AST parsing unavailable or fails
+- Supports 8 languages: Python, Go, Rust, C, C++, JavaScript, TypeScript, Java
+
+**Symbol Extraction** (`src/parser/symbol_extractor.py`):
+- Extracts symbol metadata: name, type, signature, docstring, parent class, visibility
+- Detects test symbols (functions starting with `test_`, classes ending with `Test`)
+- Categorizes symbols: implementation, test, api, internal
+- Line number accuracy: 1-indexed, inclusive (matches IDE conventions)
 
 ### Ranking Features
 
@@ -123,7 +171,52 @@ Computes PageRank scores from import relationships to identify structurally impo
 - Scores cached in per-repo `{repo}_centrality` table
 
 **Graph Expansion** (`src/retrieval/graph_expansion.py`):
-Adds related files by parsing import statements to include relevant context beyond direct matches.
+- Multi-hop BFS traversal (up to 3 hops by default) to find transitive dependencies
+- Uses AST-based import parsing for accurate dependency detection
+- Tracks hop distance for each related file (1-hop, 2-hop, 3-hop)
+- Configurable via `MAX_GRAPH_HOPS` (default: 3) and `MAX_GRAPH_RESULTS` (default: 30)
+- Handles cycles gracefully (no infinite loops via visited set)
+- Bidirectional: follows both imports (files this file uses) and imported_by (files that use this file)
+- **Graph caching**: Uses cached import graphs when available (30-50% faster)
+
+### Call Graph Analysis
+
+**Call Extraction** (`src/parser/call_extractor.py`):
+- AST-based function call detection for Python and Go
+- Context-aware: detects calls in loops, conditionals, try blocks, lambdas
+- Recursion detection: marks recursive calls automatically
+- Method call handling: distinguishes `foo()` from `obj.method()`
+- Chained call support: `obj.method1().method2()`
+
+**Call Resolution** (`src/retrieval/call_graph.py`):
+- Resolves function calls to symbols with confidence scores:
+  - 1.0 = Exact match (same file or verified import)
+  - 0.7 = Partial match (likely but uncertain)
+  - 0.5 = Unresolved (external library, dynamic call)
+- Stores call edges in edges table with context
+- Query APIs: `get_callers()`, `get_callees()`, `trace_call_chain()`
+
+**Call Graph Indexing** (`src/indexer/call_graph_indexing.py`):
+- Extracts call edges during symbol indexing
+- Resolves call targets using symbol table
+- Incremental updates: invalidates edges when files change
+
+### Agentic Code Understanding
+
+**Agentic Tools** (`src/agentic/tools.py`):
+- `agentic_context(query)`: LLM-powered code analysis
+  - Searches symbol index for relevant code
+  - Uses GPT-4o-mini to synthesize comprehensive answers
+  - Returns structured results with code locations and findings
+- `analyze_call_chain(function_name)`: Call chain analysis
+  - Traces function calls up to configurable depth
+  - Returns call tree with precise locations
+
+**Features**:
+- Combines symbol search + call graph + LLM reasoning
+- Answers complex questions: "How does authentication work?"
+- Provides code pointers with file:line references
+- Confidence scoring for reliability
 
 ## Environment Variables
 
@@ -142,15 +235,34 @@ Optional:
 - `CENTRALITY_WEIGHT` - Graph centrality boosting strength (default: 1.0, 0=disabled)
 - `IMPLEMENTATION_WEIGHT`, `DOCUMENTATION_WEIGHT`, `TEST_WEIGHT`, `CONFIG_WEIGHT` - Category boosting weights
 
+Symbol Indexing (enabled by default):
+- `ENABLE_SYMBOL_INDEXING` - Enable function/class/method indexing (default: true)
+- `SYMBOL_WEIGHT` - Weight for symbol search results (default: 0.7)
+- `CHUNK_WEIGHT` - Weight for chunk search results (default: 0.3)
+
+Graph Traversal (multi-hop dependency analysis):
+- `MAX_GRAPH_HOPS` - Maximum hop distance for traversal (default: 3)
+- `MAX_GRAPH_RESULTS` - Maximum related files to return (default: 30)
+
 See `.env.example` for complete configuration options.
 
 ## Key Implementation Details
 
-**Incremental Indexing**: `IndexerService.ensure_indexed()` checks file modification times and only re-indexes changed files.
+**Incremental Indexing**: `IndexerService.ensure_indexed()` checks file modification times and only re-indexes changed files. Symbol indexing runs alongside chunk indexing.
+
+**Symbol Incremental Updates**: When files change, their symbols are deleted via UNIQUE constraint (filename, symbol_name, line_start), then re-extracted and upserted using `ON CONFLICT DO UPDATE`.
+
+**Tree-sitter Setup**: Language parsers initialized lazily on first use. If Tree-sitter unavailable, falls back to regex-based extraction gracefully.
+
+**Multi-hop Traversal Performance**: BFS traversal with early termination:
+- Cycle prevention via visited set
+- Result limiting (max 30 files by default)
+- Hop distance tracking for context
+- Both forward (imports) and reverse (imported_by) edges explored
 
 **Repo Name Collisions**: Multiple repos with the same folder name get unique suffixes (e.g., `myapp_a1b2c3`) using path hashing.
 
-**BM25 Setup**: Full-text search indexes created lazily via `src/retrieval/fts_setup.py` on first search.
+**BM25 Setup**: Full-text search indexes created lazily via `src/retrieval/fts_setup.py` on first search. Symbols table gets its own FTS index.
 
 **Connection Pooling**: PostgreSQL connection pool managed in `src/storage/postgres.py` with automatic cleanup.
 

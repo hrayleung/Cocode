@@ -14,6 +14,7 @@ from .bm25_search import BM25Config, bm25_search
 from .centrality import get_centrality_scores
 from .file_categorizer import apply_category_boosting
 from .reranker import rerank_results
+from .symbol_search import symbol_hybrid_search
 from .vector_search import vector_search
 
 logger = logging.getLogger(__name__)
@@ -120,14 +121,19 @@ def _execute_search(
 def _run_searches_parallel(
     vector_fn: Callable[[], list[SearchResult]],
     bm25_fn: Callable[[], list[SearchResult]],
-) -> tuple[list[SearchResult], list[SearchResult], bool, bool]:
-    """Run vector and BM25 searches in parallel."""
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    symbol_fn: Callable[[], list[SearchResult]] | None = None,
+) -> tuple[list[SearchResult], list[SearchResult], list[SearchResult], bool, bool, bool]:
+    """Run vector, BM25, and symbol searches in parallel."""
+    max_workers = 3 if symbol_fn else 2
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_vector = executor.submit(vector_fn)
         future_bm25 = executor.submit(bm25_fn)
+        future_symbol = executor.submit(symbol_fn) if symbol_fn else None
 
         vector_results, vector_failed = [], False
         bm25_results, bm25_failed = [], False
+        symbol_results, symbol_failed = [], False
 
         try:
             vector_results = future_vector.result(timeout=30)
@@ -141,7 +147,14 @@ def _run_searches_parallel(
             logger.warning(f"BM25 search failed: {e}")
             bm25_failed = True
 
-    return vector_results, bm25_results, vector_failed, bm25_failed
+        if future_symbol:
+            try:
+                symbol_results = future_symbol.result(timeout=30)
+            except Exception as e:
+                logger.warning(f"Symbol search failed: {e}")
+                symbol_failed = True
+
+    return vector_results, bm25_results, symbol_results, vector_failed, bm25_failed, symbol_failed
 
 
 def hybrid_search(
@@ -152,15 +165,36 @@ def hybrid_search(
     rerank_candidates: int | None = None,
     vector_weight: float | None = None,
     bm25_weight: float | None = None,
+    symbol_weight: float | None = None,
     parallel: bool = True,
+    include_symbols: bool = True,
 ) -> list[SearchResult]:
-    """Perform hybrid search combining vector and BM25 with optional reranking."""
+    """Perform hybrid search combining vector, BM25, and symbol searches with optional reranking.
+
+    Args:
+        repo_name: Repository name
+        query: Search query
+        top_k: Number of results to return
+        use_reranker: Whether to use Cohere reranker
+        rerank_candidates: Number of candidates to rerank
+        vector_weight: Weight for vector search (default from settings)
+        bm25_weight: Weight for BM25 search (default from settings)
+        symbol_weight: Weight for symbol search (default from settings)
+        parallel: Run searches in parallel
+        include_symbols: Include symbol-level search
+
+    Returns:
+        Ranked search results
+    """
     rerank_count = rerank_candidates or settings.rerank_candidates
     vec_weight = vector_weight if vector_weight is not None else settings.vector_weight
     bm_weight = bm25_weight if bm25_weight is not None else settings.bm25_weight
+    sym_weight = symbol_weight if symbol_weight is not None else settings.symbol_weight
 
     query_embedding = get_query_embedding(query)
     bm25_config = BM25Config(k1=settings.bm25_k1, b=settings.bm25_b)
+
+    symbols_attempted = include_symbols and settings.enable_symbol_indexing
 
     def run_vector() -> list[SearchResult]:
         return vector_search(repo_name, query, top_k=rerank_count, query_embedding=query_embedding)
@@ -168,29 +202,52 @@ def hybrid_search(
     def run_bm25() -> list[SearchResult]:
         return bm25_search(repo_name, query, top_k=rerank_count, config=bm25_config)
 
+    def run_symbol() -> list[SearchResult]:
+        if not symbols_attempted:
+            return []
+        return symbol_hybrid_search(repo_name, query, top_k=rerank_count, query_embedding=query_embedding)
+
     if parallel:
-        vector_results, bm25_results, vector_failed, bm25_failed = _run_searches_parallel(
-            run_vector, run_bm25
+        vector_results, bm25_results, symbol_results, vector_failed, bm25_failed, symbol_failed = _run_searches_parallel(
+            run_vector, run_bm25, run_symbol if symbols_attempted else None
         )
+        if not symbols_attempted:
+            symbol_results, symbol_failed = [], None  # None means not attempted
     else:
         logger.debug(f"Running vector search for '{query}' in {repo_name}")
         vector_results, vector_failed = _execute_search(run_vector, "Vector")
         logger.debug(f"Running BM25 search for '{query}' in {repo_name}")
         bm25_results, bm25_failed = _execute_search(run_bm25, "BM25")
+        if symbols_attempted:
+            logger.debug(f"Running symbol search for '{query}' in {repo_name}")
+            symbol_results, symbol_failed = _execute_search(run_symbol, "Symbol")
+        else:
+            symbol_results, symbol_failed = [], None  # None means not attempted
 
-    if vector_failed and bm25_failed:
+    # Check if all attempted backends failed
+    all_failed = (vector_failed and bm25_failed and symbol_failed) if symbols_attempted else (vector_failed and bm25_failed)
+
+    if all_failed:
         raise SearchError("All search backends failed")
     if vector_failed:
-        logger.warning("Vector search failed, using BM25-only results")
+        logger.warning("Vector search failed, using BM25/symbol-only results")
     if bm25_failed:
-        logger.warning("BM25 search failed, using vector-only results")
+        logger.warning("BM25 search failed, using vector/symbol-only results")
+    if symbols_attempted and symbol_failed:
+        logger.warning("Symbol search failed, using vector/BM25-only results")
 
-    logger.info(f"Search results: vector={len(vector_results)}, bm25={len(bm25_results)}")
+    logger.info(f"Search results: vector={len(vector_results)}, bm25={len(bm25_results)}, symbol={len(symbol_results)}")
 
-    fused_results = reciprocal_rank_fusion(
-        [vector_results, bm25_results],
-        weights=[vec_weight, bm_weight],
-    )
+    # Prepare result lists and weights for RRF
+    result_lists = [vector_results, bm25_results]
+    weights = [vec_weight, bm_weight]
+
+    # Add symbol results if available
+    if symbols_attempted and symbol_results:
+        result_lists.append(symbol_results)
+        weights.append(sym_weight)
+
+    fused_results = reciprocal_rank_fusion(result_lists, weights=weights)
 
     candidates = fused_results[:rerank_count]
 

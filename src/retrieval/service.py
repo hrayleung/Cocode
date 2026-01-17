@@ -54,7 +54,22 @@ def extract_signature(content: str, language: str = "python") -> str:
 
 
 def parse_location(loc_str: str) -> str:
-    """Convert location string to human-readable format."""
+    """Convert location string to human-readable format.
+
+    Handles both chunk locations (e.g., "[100, 200)") and
+    symbol locations (e.g., "42:58").
+    """
+    # Handle symbol location format: "line_start:line_end"
+    if ':' in str(loc_str) and '[' not in str(loc_str):
+        parts = str(loc_str).split(':')
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            start_line = int(parts[0])
+            end_line = int(parts[1])
+            if end_line > start_line:
+                return f"L{start_line}-{end_line}"
+            return f"L{start_line}"
+
+    # Handle chunk location format: "[start, end)"
     match = re.match(r'\[(\d+),\s*(\d+)\)', str(loc_str))
     if match:
         start, end = int(match.group(1)), int(match.group(2))
@@ -63,6 +78,7 @@ def parse_location(loc_str: str) -> str:
         if end_line > start_line:
             return f"~L{start_line}-{end_line}"
         return f"~L{start_line}"
+
     return str(loc_str)
 
 
