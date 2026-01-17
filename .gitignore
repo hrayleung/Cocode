@@ -56,3 +56,4 @@ Thumbs.db
 # Local diagnostics
 comparison_results.json
 cocode.log
+.claude/
