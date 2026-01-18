@@ -1,6 +1,6 @@
 # Cocode
 
-**Production-ready MCP server for semantic codebase search**, powered by [CocoIndex](https://cocoindex.io/) for real-time incremental indexing and intelligent ranking.
+MCP server for semantic codebase search, powered by [CocoIndex](https://cocoindex.io/) for real-time incremental indexing and intelligent ranking.
 
 Search your codebase semantically without memorizing exact function names—find "HTTP error handler" and get all error handling logic, even if it doesn't contain those exact keywords.
 
@@ -11,7 +11,7 @@ Cocode leverages [CocoIndex](https://cocoindex.io/), a data transformation frame
 - **Incremental Processing**: Only re-indexes changed files, not the entire codebase—real-time updates with minimal computation
 - **Tree-sitter Integration**: Intelligent code chunking based on syntax structure (not arbitrary line breaks) for syntactically coherent embeddings
 - **Automatic Synchronization**: Keeps the vector index in sync with source code changes across long time horizons
-- **Production Infrastructure**: Battle-tested for powering code context in AI agents like Claude, Codex, and Gemini CLI
+- **AI Integration**: Powers code context for AI agents and development tools
 
 This combination enables fast, accurate semantic search that stays up-to-date as your code evolves.
 
@@ -30,7 +30,7 @@ This combination enables fast, accurate semantic search that stays up-to-date as
 - **Optional Cohere Reranking**: rerank-v3.5 for improved relevance (when API key provided)
 
 ### Multiple Embedding Providers
-- **Jina** (default): Late chunking preserves cross-chunk context (~24% retrieval improvement)
+- **Jina** (default): Late chunking preserves cross-chunk context
 - **Mistral**: Codestral Embed optimized specifically for code
 - **OpenAI**: text-embedding-3-large with contextual headers
 
