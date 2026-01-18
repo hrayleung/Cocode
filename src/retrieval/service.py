@@ -19,6 +19,10 @@ MIN_SCORE_RATIO = 0.4
 FULL_CODE_COUNT = 3
 MAX_CHUNKS_PER_FILE = 3
 
+# Cache size limits to prevent memory exhaustion
+MAX_FILE_CACHE_SIZE = 100  # Maximum number of files to cache in memory
+MAX_NEWLINE_CACHE_SIZE = 100  # Maximum number of newline index arrays to cache
+
 SIGNATURE_KEYWORDS = (
     "def ", "async def ", "class ", "function ", "const ", "let ",
     "var ", "fn ", "func ", "pub fn ", "impl ", "struct ", "enum ",
@@ -85,7 +89,10 @@ def location_to_lines(
     file_cache: dict[str, bytes],
     newline_cache: dict[str, list[int]],
 ) -> str:
-    """Convert a location string into 1-indexed line ranges."""
+    """Convert a location string into 1-indexed line ranges.
+
+    Uses bounded caches to prevent memory exhaustion.
+    """
     loc = str(loc_str)
 
     # Symbol format
@@ -104,7 +111,19 @@ def location_to_lines(
     # Get or compute newline positions
     if filename not in newline_cache:
         try:
+            # Cache size limit enforcement for newline cache
+            if len(newline_cache) >= MAX_NEWLINE_CACHE_SIZE:
+                # Remove oldest entry (simple FIFO eviction)
+                first_key = next(iter(newline_cache))
+                del newline_cache[first_key]
+                logger.debug(f"Evicted newline cache entry for {first_key}")
+
             if filename not in file_cache:
+                # Cache size limit enforcement for file cache
+                if len(file_cache) >= MAX_FILE_CACHE_SIZE:
+                    first_key = next(iter(file_cache))
+                    del file_cache[first_key]
+                    logger.debug(f"Evicted file cache entry for {first_key}")
                 file_cache[filename] = (Path(repo_path) / filename).read_bytes()
             newline_cache[filename] = [i for i, b in enumerate(file_cache[filename]) if b == 10]
         except Exception:

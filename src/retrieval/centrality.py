@@ -8,6 +8,8 @@ import (tests, scripts) are peripheral.
 import logging
 from collections import defaultdict
 
+from psycopg import sql
+
 from src.storage.postgres import get_connection
 from src.retrieval.vector_search import sanitize_identifier
 
@@ -150,26 +152,26 @@ def store_centrality_scores(repo_name: str, scores: dict[str, float]) -> None:
     with get_connection() as conn:
         with conn.cursor() as cur:
             # Create table if not exists
-            cur.execute(f"""
-                CREATE TABLE IF NOT EXISTS {table_name} (
+            cur.execute(sql.SQL("""
+                CREATE TABLE IF NOT EXISTS {} (
                     filename TEXT PRIMARY KEY,
                     centrality_score FLOAT NOT NULL
                 )
-            """)
+            """).format(sql.Identifier(table_name)))
 
             # Clear existing scores
-            cur.execute(f"DELETE FROM {table_name}")
+            cur.execute(sql.SQL("DELETE FROM {}").format(sql.Identifier(table_name)))
 
             # Insert new scores in batches
             if scores:
                 batch_size = 500
                 items = list(scores.items())
+                insert_sql = sql.SQL("INSERT INTO {} (filename, centrality_score) VALUES (%s, %s)").format(
+                    sql.Identifier(table_name)
+                )
                 for i in range(0, len(items), batch_size):
                     batch = items[i:i + batch_size]
-                    cur.executemany(
-                        f"INSERT INTO {table_name} (filename, centrality_score) VALUES (%s, %s)",
-                        batch
-                    )
+                    cur.executemany(insert_sql, batch)
 
         conn.commit()
 
@@ -211,11 +213,14 @@ def get_centrality_scores(
 
                 # Fetch scores for requested files
                 placeholders = ",".join(["%s"] * len(filenames))
-                cur.execute(f"""
+                cur.execute(sql.SQL("""
                     SELECT filename, centrality_score
-                    FROM {table_name}
-                    WHERE filename IN ({placeholders})
-                """, filenames)
+                    FROM {}
+                    WHERE filename IN ({})
+                """).format(
+                    sql.Identifier(table_name),
+                    sql.SQL(placeholders)
+                ), filenames)
 
                 scores = {row[0]: row[1] for row in cur.fetchall()}
 
@@ -271,7 +276,7 @@ def delete_centrality_table(repo_name: str) -> None:
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+                cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(table_name)))
             conn.commit()
         logger.debug(f"Deleted centrality table {table_name}")
     except Exception as e:
