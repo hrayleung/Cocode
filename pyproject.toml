@@ -5,7 +5,7 @@ description = "High-performance MCP server for codebase indexing and retrieval"
 requires-python = ">=3.10"
 dependencies = [
     "fastmcp>=2.0",
-    "cocoindex[embeddings]",
+    "cocoindex",
     "openai>=1.0",
     "cohere>=5.0",
     "httpx>=0.24",
