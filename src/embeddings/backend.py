@@ -29,7 +29,10 @@ def _validate_api(url: str, api_key: str, payload: dict) -> bool:
             json=payload,
             timeout=10.0,
         )
-        return response.status_code == 200
+        if response.status_code == 200:
+            return True
+        logger.warning(f"API at {url} returned {response.status_code}")
+        return False
     except Exception as e:
         logger.warning(f"API validation failed for {url}: {e}")
         return False
