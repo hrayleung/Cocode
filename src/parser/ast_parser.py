@@ -1,4 +1,11 @@
-"""AST-based code parsing using Tree-sitter."""
+"""AST-based code parsing using Tree-sitter.
+
+This module provides language-aware parsing for import extraction using
+Tree-sitter grammars. It supports Python, Go, Rust, C/C++, JavaScript,
+TypeScript, and TSX.
+
+Falls back gracefully when Tree-sitter is unavailable.
+"""
 
 import logging
 from pathlib import Path
@@ -21,7 +28,10 @@ logger = logging.getLogger(__name__)
 
 
 class LanguageParsers:
-    """Singleton to manage Tree-sitter language parsers."""
+    """Singleton manager for Tree-sitter language parsers.
+
+    Parsers are lazily initialized on first use and reused across calls.
+    """
 
     _instance = None
     _initialized = False
@@ -46,7 +56,10 @@ class LanguageParsers:
                 "typescript": Language(ts_typescript.language_typescript()),
                 "tsx": Language(ts_typescript.language_tsx()),
             }
-            self.parsers = {name: Parser(lang) for name, lang in self.languages.items()}
+            self.parsers = {
+                name: Parser(lang)
+                for name, lang in self.languages.items()
+            }
             self._initialized = True
             logger.info(f"Initialized Tree-sitter parsers for {len(self.parsers)} languages")
         except Exception as e:
@@ -55,14 +68,28 @@ class LanguageParsers:
 
 
 def get_parser(language: str) -> Optional[Parser]:
-    """Get Tree-sitter parser for a language."""
+    """Get Tree-sitter parser for a language.
+
+    Args:
+        language: Language name (e.g., "python", "go")
+
+    Returns:
+        Parser instance or None if unavailable
+    """
     if not TREE_SITTER_AVAILABLE:
         return None
     return LanguageParsers().parsers.get(language)
 
 
 def is_language_supported(language: str) -> bool:
-    """Check if a language is supported for AST parsing."""
+    """Check if a language is supported for AST parsing.
+
+    Args:
+        language: Language name to check
+
+    Returns:
+        True if the language can be parsed
+    """
     return TREE_SITTER_AVAILABLE and language in LanguageParsers().parsers
 
 

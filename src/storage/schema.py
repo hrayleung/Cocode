@@ -1,8 +1,13 @@
-"""Database schema definitions."""
+"""Database schema definitions for cocode.
+
+This module provides SQL schema definitions and helper functions for creating
+and managing database tables, schemas, and identifiers safely.
+"""
 
 import re
 from psycopg import sql
 
+# Core repos table tracks all indexed repositories
 REPOS_TABLE = """
 CREATE TABLE IF NOT EXISTS repos (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
