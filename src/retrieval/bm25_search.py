@@ -36,12 +36,13 @@ _fts_ready_lock = threading.Lock()
 
 def _check_extension(extension: str, installed: bool = True) -> bool:
     """Check if a PostgreSQL extension is available or installed."""
-    table = "pg_extension" if installed else "pg_available_extensions"
-    col = "extname" if installed else "name"
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(f"SELECT 1 FROM {table} WHERE {col} = %s", (extension,))
+                if installed:
+                    cur.execute("SELECT 1 FROM pg_extension WHERE extname = %s", (extension,))
+                else:
+                    cur.execute("SELECT 1 FROM pg_available_extensions WHERE name = %s", (extension,))
                 return cur.fetchone() is not None
     except Exception:
         return False
@@ -165,7 +166,7 @@ def _search_keyword_fallback(cur, table_name: str, tokens: list[str], top_k: int
         return []
 
     patterns = [f"%{t}%" for t in tokens]
-    score_expr = " + ".join(f"(CASE WHEN content ILIKE %s THEN 1 ELSE 0 END)" for _ in tokens)
+    score_expr = " + ".join("(CASE WHEN content ILIKE %s THEN 1 ELSE 0 END)" for _ in tokens)
     where_clause = " OR ".join("content ILIKE %s" for _ in tokens)
 
     cur.execute(psycopg_sql.SQL("""

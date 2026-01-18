@@ -197,7 +197,7 @@ def hybrid_search(
         if outcome.failed:
             logger.warning(f"{name.capitalize()} search failed, using other backends")
 
-    logger.info(f"Search results: " + ", ".join(f"{k}={len(v.results)}" for k, v in outcomes.items()))
+    logger.info("Search results: " + ", ".join(f"{k}={len(v.results)}" for k, v in outcomes.items()))
 
     # Fuse results
     result_lists = [outcomes["vector"].results, outcomes["bm25"].results]
