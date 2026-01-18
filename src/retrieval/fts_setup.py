@@ -6,6 +6,8 @@ Creates a text search configuration optimized for source code that:
 - Preserves numbers and symbols in identifiers
 """
 
+from psycopg import sql
+
 from src.storage.postgres import get_connection
 import logging
 import threading
@@ -164,18 +166,24 @@ def add_code_fts_to_table(table_name: str) -> bool:
                     else:
                         tsvector_expr = "to_tsvector('english', coalesce(content, ''))"
 
-                    cur.execute(f"""
-                        ALTER TABLE {table_name}
+                    cur.execute(sql.SQL("""
+                        ALTER TABLE {}
                         ADD COLUMN content_tsv tsvector
-                        GENERATED ALWAYS AS ({tsvector_expr}) STORED
-                    """)
+                        GENERATED ALWAYS AS ({}) STORED
+                    """).format(
+                        sql.Identifier(table_name),
+                        sql.SQL(tsvector_expr)
+                    ))
 
-                # Create GIN index
+                # Create GIN index with sanitized names
                 index_name = f"idx_{table_name.replace('.', '_')}_content_tsv"
-                cur.execute(f"""
-                    CREATE INDEX IF NOT EXISTS {index_name}
-                    ON {table_name} USING GIN(content_tsv)
-                """)
+                cur.execute(sql.SQL("""
+                    CREATE INDEX IF NOT EXISTS {}
+                    ON {} USING GIN(content_tsv)
+                """).format(
+                    sql.Identifier(index_name),
+                    sql.Identifier(table_name)
+                ))
 
             conn.commit()
             logger.info(f"Ensured code FTS on {table_name}")

@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 MIN_TOP_K = 1
 MAX_TOP_K = 100
+MAX_QUERY_LENGTH = 50_000  # 50KB maximum query length
 
 mcp = FastMCP(
     "cocode",
@@ -49,6 +50,8 @@ async def codebase_retrieval(
     """
     if not query or not query.strip():
         return [{"error": "Query cannot be empty"}]
+    if len(query) > MAX_QUERY_LENGTH:
+        return [{"error": f"Query too long (max {MAX_QUERY_LENGTH} characters)"}]
     if top_k < MIN_TOP_K:
         return [{"error": f"top_k must be at least {MIN_TOP_K}"}]
     if top_k > MAX_TOP_K:
@@ -81,16 +84,16 @@ async def codebase_retrieval(
 
     except PathError as e:
         logger.warning(f"Path error: {e}")
-        return [{"error": str(e)}]
+        return [{"error": "Invalid path specified"}]
     except IndexingError as e:
         logger.error(f"Indexing error: {e}")
-        return [{"error": f"Failed to index: {e}"}]
+        return [{"error": "Failed to index repository"}]
     except SearchError as e:
         logger.error(f"Search error: {e}")
-        return [{"error": f"Search failed: {e}"}]
+        return [{"error": "Search operation failed"}]
     except Exception as e:
         logger.exception(f"Unexpected error: {e}")
-        return [{"error": f"Unexpected error: {e}"}]
+        return [{"error": "An unexpected error occurred"}]
 
 
 @mcp.tool()
@@ -111,19 +114,19 @@ async def clear_index(path: str | None = None) -> dict:
         resolved_path = Path(path).resolve()
 
         if not resolved_path.exists() or not resolved_path.is_dir():
-            return {"error": f"Invalid path: {path}"}
+            logger.warning(f"Invalid path provided: {path}")
+            return {"error": "Invalid path specified"}
 
         repo_name = indexer.resolve_repo_name(resolved_path)
         indexer._delete_index(repo_name)
 
         return {
             "status": "cleared",
-            "path": str(resolved_path),
             "message": "Index cleared. Next search will rebuild.",
         }
     except Exception as e:
         logger.error(f"Failed to clear index: {e}")
-        return {"error": f"Failed to clear index: {e}"}
+        return {"error": "Failed to clear index"}
 
 
 def main() -> None:

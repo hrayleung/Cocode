@@ -92,13 +92,13 @@ def _search_pg_search(table_name: str, tokens: list[str], top_k: int) -> list[Se
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(f"""
+            cur.execute(psycopg_sql.SQL("""
                 SELECT filename, location, content, paradedb.score(id) AS score
-                FROM {table_name}
+                FROM {}
                 WHERE content @@@ %s
                 ORDER BY score DESC
                 LIMIT %s
-            """, (" ".join(tokens), top_k))
+            """).format(psycopg_sql.Identifier(table_name)), (" ".join(tokens), top_k))
             return _rows_to_results(cur.fetchall())
 
 
@@ -110,12 +110,12 @@ def _search_pg_textsearch(table_name: str, tokens: list[str], top_k: int) -> lis
     search_query = " ".join(tokens)
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(f"""
+            cur.execute(psycopg_sql.SQL("""
                 SELECT filename, location, content, -(content <@> %s) AS score
-                FROM {table_name}
+                FROM {}
                 ORDER BY content <@> %s
                 LIMIT %s
-            """, (search_query, search_query, top_k))
+            """).format(psycopg_sql.Identifier(table_name)), (search_query, search_query, top_k))
             return _rows_to_results(cur.fetchall())
 
 
@@ -131,16 +131,26 @@ def _search_native_fts(table_name: str, tokens: list[str], top_k: int, config: B
                 "SELECT 1 FROM information_schema.columns WHERE table_name = %s AND column_name = 'content_tsv'",
                 (table_name,)
             )
-            tsv_expr = "content_tsv" if cur.fetchone() else "to_tsvector('english', content)"
+            has_tsv = cur.fetchone() is not None
 
-            cur.execute(f"""
-                WITH query AS (SELECT websearch_to_tsquery('english', %s) AS q)
-                SELECT filename, location, content, ts_rank_cd({tsv_expr}, query.q, 37) AS score
-                FROM {table_name}, query
-                WHERE {tsv_expr} @@ query.q
-                ORDER BY score DESC
-                LIMIT %s
-            """, (" OR ".join(tokens), top_k))
+            if has_tsv:
+                cur.execute(psycopg_sql.SQL("""
+                    WITH query AS (SELECT websearch_to_tsquery('english', %s) AS q)
+                    SELECT filename, location, content, ts_rank_cd(content_tsv, query.q, 37) AS score
+                    FROM {}, query
+                    WHERE content_tsv @@ query.q
+                    ORDER BY score DESC
+                    LIMIT %s
+                """).format(psycopg_sql.Identifier(table_name)), (" OR ".join(tokens), top_k))
+            else:
+                cur.execute(psycopg_sql.SQL("""
+                    WITH query AS (SELECT websearch_to_tsquery('english', %s) AS q)
+                    SELECT filename, location, content, ts_rank_cd(to_tsvector('english', content), query.q, 37) AS score
+                    FROM {}, query
+                    WHERE to_tsvector('english', content) @@ query.q
+                    ORDER BY score DESC
+                    LIMIT %s
+                """).format(psycopg_sql.Identifier(table_name)), (" OR ".join(tokens), top_k))
 
             rows = cur.fetchall()
             if not rows:
@@ -158,14 +168,18 @@ def _search_keyword_fallback(cur, table_name: str, tokens: list[str], top_k: int
     score_expr = " + ".join(f"(CASE WHEN content ILIKE %s THEN 1 ELSE 0 END)" for _ in tokens)
     where_clause = " OR ".join("content ILIKE %s" for _ in tokens)
 
-    cur.execute(f"""
+    cur.execute(psycopg_sql.SQL("""
         SELECT filename, location, content,
-               ({score_expr})::float / %s * (1.0 / (1.0 + ln(greatest(length(content), 1)))) AS score
-        FROM {table_name}
-        WHERE {where_clause}
+               ({score})::float / %s * (1.0 / (1.0 + ln(greatest(length(content), 1)))) AS score
+        FROM {table}
+        WHERE {where}
         ORDER BY score DESC
         LIMIT %s
-    """, patterns + [len(tokens)] + patterns + [top_k])
+    """).format(
+        score=psycopg_sql.SQL(score_expr),
+        table=psycopg_sql.Identifier(table_name),
+        where=psycopg_sql.SQL(where_clause)
+    ), patterns + [len(tokens)] + patterns + [top_k])
 
     return cur.fetchall()
 
@@ -203,12 +217,18 @@ def _ensure_basic_fts_index(repo_name: str) -> bool:
                     (table_name,)
                 )
                 if not cur.fetchone():
-                    cur.execute(f"""
-                        ALTER TABLE {table_name}
+                    cur.execute(psycopg_sql.SQL("""
+                        ALTER TABLE {}
                         ADD COLUMN IF NOT EXISTS content_tsv tsvector
                         GENERATED ALWAYS AS (to_tsvector('english', coalesce(content, ''))) STORED
-                    """)
-                cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_content_tsv ON {table_name} USING GIN(content_tsv)")
+                    """).format(psycopg_sql.Identifier(table_name)))
+
+                # Create index with sanitized table name
+                index_name = f"idx_{table_name}_content_tsv"
+                cur.execute(psycopg_sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {} USING GIN(content_tsv)").format(
+                    psycopg_sql.Identifier(index_name),
+                    psycopg_sql.Identifier(table_name)
+                ))
                 conn.commit()
                 return True
     except Exception as e:
@@ -246,9 +266,9 @@ def get_corpus_stats(repo_name: str) -> dict:
     table_name = get_chunks_table_name(repo_name)
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(f"""
+            cur.execute(psycopg_sql.SQL("""
                 SELECT COUNT(*), AVG(length(content)), SUM(length(content))
-                FROM {table_name}
-            """)
+                FROM {}
+            """).format(psycopg_sql.Identifier(table_name)))
             row = cur.fetchone()
     return {"doc_count": row[0] or 0, "avg_doc_length": float(row[1]) if row[1] else 0.0, "total_length": row[2] or 0}
