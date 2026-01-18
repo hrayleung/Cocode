@@ -9,12 +9,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastmcp import FastMCP
+from psycopg import sql
 
 from config.settings import settings
 from src.exceptions import IndexingError, PathError, SearchError
 from src.indexer.service import get_indexer
-from src.retrieval.service import get_searcher
 from src.storage.postgres import close_pool, init_db, get_connection
+from src.storage.schema import sanitize_repo_name
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,27 +33,22 @@ mcp = FastMCP(
 
 def _get_symbol_from_db(repo_name: str, symbol_name: str, symbol_type: str | None = None) -> list[dict]:
     """Query symbols table for matching symbols."""
-    from src.storage.schema import sanitize_repo_name
     schema = sanitize_repo_name(repo_name)
     
     with get_connection() as conn:
         with conn.cursor() as cur:
+            base_query = sql.SQL("""
+                SELECT symbol_name, symbol_type, filename, line_start, line_end, signature, docstring
+                FROM {schema}.symbols
+                WHERE symbol_name ILIKE %s
+            """).format(schema=sql.Identifier(schema))
+            
             if symbol_type:
-                cur.execute(f"""
-                    SELECT symbol_name, symbol_type, filename, line_start, line_end, signature, docstring
-                    FROM {schema}.symbols
-                    WHERE symbol_name ILIKE %s AND symbol_type = %s
-                    ORDER BY symbol_name
-                    LIMIT 20
-                """, (f"%{symbol_name}%", symbol_type))
+                query = sql.SQL("{} AND symbol_type = %s ORDER BY symbol_name LIMIT 20").format(base_query)
+                cur.execute(query, (f"%{symbol_name}%", symbol_type))
             else:
-                cur.execute(f"""
-                    SELECT symbol_name, symbol_type, filename, line_start, line_end, signature, docstring
-                    FROM {schema}.symbols
-                    WHERE symbol_name ILIKE %s
-                    ORDER BY symbol_name
-                    LIMIT 20
-                """, (f"%{symbol_name}%",))
+                query = sql.SQL("{} ORDER BY symbol_name LIMIT 20").format(base_query)
+                cur.execute(query, (f"%{symbol_name}%",))
             
             return [
                 {
@@ -73,7 +69,6 @@ def _read_file_lines(filepath: Path, start: int, end: int) -> str:
     with open(filepath, "r", encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
     
-    # Convert to 0-indexed
     start_idx = max(0, start - 1)
     end_idx = min(len(lines), end)
     
@@ -112,13 +107,11 @@ async def get_symbol(
         if index_result.chunk_count == 0:
             return [{"error": f"No code files found in {path}"}]
 
-        # Find matching symbols
         symbols = _get_symbol_from_db(index_result.repo_name, symbol_name.strip(), symbol_type)
         
         if not symbols:
             return [{"message": f"No symbol found matching '{symbol_name}'"}]
 
-        # Read actual source code for each symbol
         results = []
         for sym in symbols:
             filepath = repo_path / sym["filename"]
@@ -139,7 +132,7 @@ async def get_symbol(
                     "type": sym["type"],
                     "filename": sym["filename"],
                     "lines": f"L{sym['line_start']}-{sym['line_end']}",
-                    "error": "File not found",
+                    "error": "File not found on disk",
                 })
 
         return results
@@ -183,31 +176,53 @@ async def search_symbols(
         if index_result.chunk_count == 0:
             return [{"error": f"No code files found in {path}"}]
 
-        # Use symbol search from hybrid search
-        from src.retrieval.symbol_search import symbol_hybrid_search
-        from src.retrieval.hybrid import get_query_embedding
+        # Query symbols directly from database with text search
+        schema = sanitize_repo_name(index_result.repo_name)
         
-        query_embedding = get_query_embedding(query.strip())
-        results = symbol_hybrid_search(
-            index_result.repo_name,
-            query.strip(),
-            top_k=top_k,
-            query_embedding=query_embedding,
-        )
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                # Use simple text matching for now
+                search_term = f"%{query.strip()}%"
+                
+                if symbol_type:
+                    cur.execute(sql.SQL("""
+                        SELECT symbol_name, symbol_type, filename, line_start, line_end, signature, docstring
+                        FROM {schema}.symbols
+                        WHERE (symbol_name ILIKE %s OR signature ILIKE %s OR COALESCE(docstring, '') ILIKE %s)
+                          AND symbol_type = %s
+                        ORDER BY 
+                            CASE WHEN symbol_name ILIKE %s THEN 0 ELSE 1 END,
+                            symbol_name
+                        LIMIT %s
+                    """).format(schema=sql.Identifier(schema)), 
+                    (search_term, search_term, search_term, symbol_type, search_term, top_k))
+                else:
+                    cur.execute(sql.SQL("""
+                        SELECT symbol_name, symbol_type, filename, line_start, line_end, signature, docstring
+                        FROM {schema}.symbols
+                        WHERE symbol_name ILIKE %s OR signature ILIKE %s OR COALESCE(docstring, '') ILIKE %s
+                        ORDER BY 
+                            CASE WHEN symbol_name ILIKE %s THEN 0 ELSE 1 END,
+                            symbol_name
+                        LIMIT %s
+                    """).format(schema=sql.Identifier(schema)), 
+                    (search_term, search_term, search_term, search_term, top_k))
+                
+                rows = cur.fetchall()
 
-        if not results:
+        if not rows:
             return [{"message": f"No symbols found matching '{query}'"}]
 
-        # Format results
         return [
             {
-                "name": r.filename.split("::")[-1] if "::" in r.filename else Path(r.filename).stem,
-                "filename": r.filename.split("::")[0] if "::" in r.filename else r.filename,
-                "location": r.location,
-                "score": round(r.score, 4),
-                "preview": r.content[:200] + "..." if len(r.content) > 200 else r.content,
+                "name": row[0],
+                "type": row[1],
+                "filename": row[2],
+                "lines": f"L{row[3]}-{row[4]}",
+                "signature": row[5],
+                "docstring": row[6][:200] + "..." if row[6] and len(row[6]) > 200 else row[6],
             }
-            for r in results
+            for row in rows
         ]
 
     except PathError as e:
@@ -246,7 +261,6 @@ async def list_symbols(
         if index_result.chunk_count == 0:
             return [{"error": f"No code files found in {path}"}]
 
-        from src.storage.schema import sanitize_repo_name
         schema = sanitize_repo_name(index_result.repo_name)
         
         with get_connection() as conn:
@@ -261,27 +275,37 @@ async def list_symbols(
                     conditions.append("symbol_type = %s")
                     params.append(symbol_type)
                 
-                where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+                where_clause = sql.SQL("WHERE {}").format(
+                    sql.SQL(" AND ").join(sql.SQL(c) for c in conditions)
+                ) if conditions else sql.SQL("")
+                
                 params.append(min(limit, 100))
                 
-                cur.execute(f"""
+                query = sql.SQL("""
                     SELECT symbol_name, symbol_type, filename, line_start, line_end, signature
                     FROM {schema}.symbols
                     {where}
                     ORDER BY filename, line_start
                     LIMIT %s
-                """, params)
+                """).format(schema=sql.Identifier(schema), where=where_clause)
                 
-                return [
-                    {
-                        "name": row[0],
-                        "type": row[1],
-                        "filename": row[2],
-                        "lines": f"L{row[3]}-{row[4]}",
-                        "signature": row[5],
-                    }
-                    for row in cur.fetchall()
-                ]
+                cur.execute(query, params)
+                
+                rows = cur.fetchall()
+                
+        if not rows:
+            return [{"message": "No symbols found"}]
+                
+        return [
+            {
+                "name": row[0],
+                "type": row[1],
+                "filename": row[2],
+                "lines": f"L{row[3]}-{row[4]}",
+                "signature": row[5],
+            }
+            for row in rows
+        ]
 
     except PathError as e:
         logger.warning(f"Path error: {e}")
@@ -317,10 +341,10 @@ async def read_file(
 
     try:
         repo_path = Path(path).resolve()
-        filepath = repo_path / filename.strip()
+        filepath = (repo_path / filename.strip()).resolve()
         
         # Security: ensure file is within repo
-        if not filepath.resolve().is_relative_to(repo_path):
+        if not filepath.is_relative_to(repo_path):
             return {"error": "File path outside repository"}
         
         if not filepath.exists():

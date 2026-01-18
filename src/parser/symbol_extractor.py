@@ -206,6 +206,263 @@ def extract_go_symbols(tree_root: Node, source_bytes: bytes, filename: str) -> l
     return symbols
 
 
+def extract_javascript_symbols(tree_root: Node, source_bytes: bytes, filename: str) -> list[Symbol]:
+    """Extract symbols from JavaScript/TypeScript AST."""
+    symbols = []
+    is_test_file = any(p in filename for p in [".test.", ".spec.", "_test.", "__test__"])
+
+    def get_text(node: Node) -> str:
+        return source_bytes[node.start_byte:node.end_byte].decode("utf-8")
+
+    def get_signature(node: Node) -> str:
+        return get_text(node).split("\n")[0].strip()[:200]
+
+    def get_jsdoc(node: Node) -> Optional[str]:
+        """Get JSDoc comment above node."""
+        prev = node.prev_sibling
+        if prev and prev.type == "comment":
+            text = get_text(prev)
+            if text.startswith("/**"):
+                return text[3:-2].strip() if text.endswith("*/") else text[3:].strip()
+        return None
+
+    def visit_node(node: Node, parent_class: Optional[str] = None):
+        # Function declaration: function foo() {}
+        if node.type == "function_declaration":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                name = get_text(name_node)
+                symbols.append(Symbol(
+                    symbol_name=name,
+                    symbol_type="function",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=get_signature(node),
+                    docstring=get_jsdoc(node),
+                    visibility="public",
+                    category="test" if is_test_file or name.startswith("test") else "implementation",
+                ))
+
+        # Arrow function in variable: const foo = () => {}
+        elif node.type in ("lexical_declaration", "variable_declaration"):
+            for decl in node.children:
+                if decl.type == "variable_declarator":
+                    name_node = decl.child_by_field_name("name")
+                    value_node = decl.child_by_field_name("value")
+                    if name_node and value_node and value_node.type in ("arrow_function", "function"):
+                        name = get_text(name_node)
+                        symbols.append(Symbol(
+                            symbol_name=name,
+                            symbol_type="function",
+                            line_start=node.start_point[0] + 1,
+                            line_end=node.end_point[0] + 1,
+                            signature=get_signature(node),
+                            docstring=get_jsdoc(node),
+                            visibility="public",
+                            category="test" if is_test_file or name.startswith("test") else "implementation",
+                        ))
+
+        # Class declaration
+        elif node.type == "class_declaration":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                name = get_text(name_node)
+                symbols.append(Symbol(
+                    symbol_name=name,
+                    symbol_type="class",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=get_signature(node),
+                    docstring=get_jsdoc(node),
+                    visibility="public",
+                    category="test" if is_test_file or name.startswith("Test") else "implementation",
+                ))
+                # Visit class body for methods
+                body = node.child_by_field_name("body")
+                if body:
+                    for child in body.children:
+                        visit_node(child, parent_class=name)
+                return
+
+        # Method definition inside class
+        elif node.type == "method_definition":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                name = get_text(name_node)
+                visibility = "private" if name.startswith("#") or name.startswith("_") else "public"
+                symbols.append(Symbol(
+                    symbol_name=name,
+                    symbol_type="method",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=get_signature(node),
+                    docstring=get_jsdoc(node),
+                    parent_symbol=parent_class,
+                    visibility=visibility,
+                    category="test" if is_test_file else "implementation",
+                ))
+
+        # TypeScript interface
+        elif node.type == "interface_declaration":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                name = get_text(name_node)
+                symbols.append(Symbol(
+                    symbol_name=name,
+                    symbol_type="interface",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=get_signature(node),
+                    docstring=get_jsdoc(node),
+                    visibility="public",
+                    category="implementation",
+                ))
+
+        # TypeScript type alias
+        elif node.type == "type_alias_declaration":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                name = get_text(name_node)
+                symbols.append(Symbol(
+                    symbol_name=name,
+                    symbol_type="class",  # treat type as class for simplicity
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=get_signature(node),
+                    docstring=get_jsdoc(node),
+                    visibility="public",
+                    category="implementation",
+                ))
+
+        # Export statement - check what's being exported
+        elif node.type == "export_statement":
+            for child in node.children:
+                visit_node(child, parent_class)
+            return
+
+        for child in node.children:
+            visit_node(child, parent_class)
+
+    visit_node(tree_root)
+    return symbols
+
+
+def extract_rust_symbols(tree_root: Node, source_bytes: bytes, filename: str) -> list[Symbol]:
+    """Extract symbols from Rust AST."""
+    symbols = []
+    is_test_file = filename.endswith("_test.rs") or "/tests/" in filename
+
+    def get_text(node: Node) -> str:
+        return source_bytes[node.start_byte:node.end_byte].decode("utf-8")
+
+    def get_signature(node: Node) -> str:
+        return get_text(node).split("{")[0].strip()[:200]
+
+    def get_doc_comment(node: Node) -> Optional[str]:
+        """Get /// or //! doc comment above node."""
+        comments = []
+        prev = node.prev_sibling
+        while prev and prev.type in ("line_comment", "block_comment"):
+            text = get_text(prev)
+            if text.startswith("///") or text.startswith("//!"):
+                comments.insert(0, text[3:].strip())
+            prev = prev.prev_sibling
+        return "\n".join(comments) if comments else None
+
+    def is_pub(node: Node) -> bool:
+        """Check if node has pub visibility."""
+        for child in node.children:
+            if child.type == "visibility_modifier":
+                return True
+        return False
+
+    def visit_node(node: Node, parent_impl: Optional[str] = None):
+        # Function: fn foo() {}
+        if node.type == "function_item":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                name = get_text(name_node)
+                is_test = name.startswith("test_") or any(
+                    get_text(c).startswith("#[test") or get_text(c).startswith("#[cfg(test")
+                    for c in node.children if c.type == "attribute_item"
+                )
+                symbols.append(Symbol(
+                    symbol_name=name,
+                    symbol_type="method" if parent_impl else "function",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=get_signature(node),
+                    docstring=get_doc_comment(node),
+                    parent_symbol=parent_impl,
+                    visibility="public" if is_pub(node) else "private",
+                    category="test" if is_test or is_test_file else "implementation",
+                ))
+
+        # Struct
+        elif node.type == "struct_item":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                name = get_text(name_node)
+                symbols.append(Symbol(
+                    symbol_name=name,
+                    symbol_type="class",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=get_signature(node),
+                    docstring=get_doc_comment(node),
+                    visibility="public" if is_pub(node) else "private",
+                    category="implementation",
+                ))
+
+        # Enum
+        elif node.type == "enum_item":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                name = get_text(name_node)
+                symbols.append(Symbol(
+                    symbol_name=name,
+                    symbol_type="class",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=get_signature(node),
+                    docstring=get_doc_comment(node),
+                    visibility="public" if is_pub(node) else "private",
+                    category="implementation",
+                ))
+
+        # Trait
+        elif node.type == "trait_item":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                name = get_text(name_node)
+                symbols.append(Symbol(
+                    symbol_name=name,
+                    symbol_type="interface",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=get_signature(node),
+                    docstring=get_doc_comment(node),
+                    visibility="public" if is_pub(node) else "private",
+                    category="implementation",
+                ))
+
+        # Impl block - visit methods inside
+        elif node.type == "impl_item":
+            type_node = node.child_by_field_name("type")
+            impl_name = get_text(type_node) if type_node else None
+            body = node.child_by_field_name("body")
+            if body:
+                for child in body.children:
+                    visit_node(child, parent_impl=impl_name)
+            return
+
+        for child in node.children:
+            visit_node(child, parent_impl)
+
+    visit_node(tree_root)
+    return symbols
+
+
 def extract_symbols(content: str, language: str, filename: str) -> list[Symbol]:
     """Extract symbols from source code using AST parsing."""
     if not HAS_TREE_SITTER:
@@ -229,6 +486,10 @@ def extract_symbols(content: str, language: str, filename: str) -> list[Symbol]:
             return extract_python_symbols(tree.root_node, source_bytes, filename)
         if language == "go":
             return extract_go_symbols(tree.root_node, source_bytes, filename)
+        if language in ("javascript", "typescript", "tsx"):
+            return extract_javascript_symbols(tree.root_node, source_bytes, filename)
+        if language == "rust":
+            return extract_rust_symbols(tree.root_node, source_bytes, filename)
 
         logger.debug(f"Symbol extraction not implemented for {language}")
         return []
