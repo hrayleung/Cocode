@@ -149,7 +149,7 @@ class IndexerService:
         last_ts = self._datetime_to_timestamp(repo.last_indexed)
         now = time.monotonic()
 
-        # Check cache (1 second TTL)
+        # Check cache (5 second TTL)
         cached = self._change_check_cache.get(repo_name)
         if cached and cached[0] == last_ts and (now - cached[1]) < 5.0:
             return cached[2]
