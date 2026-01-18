@@ -136,11 +136,11 @@ class RepoManager:
 
     def get_chunk_count(self, name: str) -> int:
         """Get number of indexed chunks for a repository."""
-        return self._execute_count_query(name, "SELECT COUNT(*) FROM {}")
+        return self._execute_count_query(name, "SELECT COUNT(*) FROM {table}")
 
     def get_file_count(self, name: str) -> int:
         """Get number of unique files indexed for a repository."""
-        return self._execute_count_query(name, "SELECT COUNT(DISTINCT filename) FROM {}")
+        return self._execute_count_query(name, "SELECT COUNT(DISTINCT filename) FROM {table}")
 
     def _execute_count_query(self, name: str, query_template: str) -> int:
         """Execute a count query on the chunks table."""
@@ -148,7 +148,8 @@ class RepoManager:
         with get_connection() as conn:
             with conn.cursor() as cur:
                 try:
-                    cur.execute(query_template.format(table_name))
+                    query = psycopg_sql.SQL(query_template).format(table=psycopg_sql.Identifier(table_name))
+                    cur.execute(query)
                     return cur.fetchone()[0]
                 except Exception as e:
                     logger.debug(f"Error executing count query for {name}: {e}")
