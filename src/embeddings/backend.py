@@ -49,11 +49,13 @@ def get_embedding_provider():
     from src.embeddings.provider import JinaProvider, MistralProvider, OpenAIProvider
 
     provider = get_selected_provider()
-    if provider == "mistral":
-        return MistralProvider()
-    elif provider == "jina":
-        return JinaProvider()
-    return OpenAIProvider()
+
+    providers = {
+        "mistral": MistralProvider,
+        "jina": JinaProvider,
+        "openai": OpenAIProvider,
+    }
+    return providers.get(provider, OpenAIProvider)()
 
 
 def should_use_jina() -> bool:

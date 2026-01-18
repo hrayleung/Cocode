@@ -3,6 +3,7 @@
 import logging
 import re
 import threading
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 import bisect
@@ -19,25 +20,27 @@ MIN_SCORE_RATIO = 0.4
 FULL_CODE_COUNT = 3
 MAX_CHUNKS_PER_FILE = 3
 
+# Keywords that indicate the start of a function/class signature
+SIGNATURE_KEYWORDS = (
+    "def ", "async def ", "class ", "function ", "const ", "let ",
+    "var ", "fn ", "func ", "pub fn ", "impl ", "struct ", "enum ",
+    "interface ", "type ", "export ", "@",
+)
+
+# Common comment prefixes to skip when extracting signatures
+COMMENT_PREFIXES = ("#", "//", "/*", '"""', "'''")
+
 
 def extract_signature(content: str, language: str = "python") -> str:
     """Extract function/class signature from code content."""
     lines = content.strip().split("\n")
     signatures = []
 
-    signature_keywords = (
-        "def ", "async def ", "class ", "function ", "const ", "let ",
-        "var ", "fn ", "func ", "pub fn ", "impl ", "struct ", "enum ",
-        "interface ", "type ", "export ", "@",
-    )
-
-    comment_prefixes = ("#", "//", "/*", '"""', "'''")
-
     for line in lines:
         stripped = line.strip()
-        if not stripped or stripped.startswith(comment_prefixes):
+        if not stripped or stripped.startswith(COMMENT_PREFIXES):
             continue
-        if any(stripped.startswith(kw) for kw in signature_keywords):
+        if any(stripped.startswith(kw) for kw in SIGNATURE_KEYWORDS):
             sig = stripped.split("{")[0].rstrip(" {:")
             signatures.append(sig)
             if len(signatures) >= 2:
@@ -49,10 +52,31 @@ def extract_signature(content: str, language: str = "python") -> str:
     # Fall back to first non-comment line
     for line in lines[:5]:
         stripped = line.strip()
-        if stripped and not stripped.startswith(comment_prefixes):
+        if stripped and not stripped.startswith(COMMENT_PREFIXES):
             return stripped[:100]
 
     return lines[0][:80] if lines else ""
+
+
+def _format_line_range(start_line: int, end_line: int) -> str:
+    """Format a line range as L{start}-{end} or L{start} for single lines."""
+    if end_line > start_line:
+        return f"L{start_line}-{end_line}"
+    return f"L{start_line}"
+
+
+def _parse_symbol_location(loc_str: str) -> str | None:
+    """Parse symbol location format 'line_start:line_end' into formatted string.
+
+    Returns None if the string is not in symbol location format.
+    """
+    loc = str(loc_str)
+    if ':' not in loc or '[' in loc:
+        return None
+    parts = loc.split(':')
+    if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+        return _format_line_range(int(parts[0]), int(parts[1]))
+    return None
 
 
 def parse_location(loc_str: str) -> str:
@@ -61,15 +85,10 @@ def parse_location(loc_str: str) -> str:
     Handles both chunk locations (e.g., "[100, 200)") and
     symbol locations (e.g., "42:58").
     """
-    # Handle symbol location format: "line_start:line_end"
-    if ':' in str(loc_str) and '[' not in str(loc_str):
-        parts = str(loc_str).split(':')
-        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-            start_line = int(parts[0])
-            end_line = int(parts[1])
-            if end_line > start_line:
-                return f"L{start_line}-{end_line}"
-            return f"L{start_line}"
+    # Handle symbol location format
+    symbol_result = _parse_symbol_location(loc_str)
+    if symbol_result:
+        return symbol_result
 
     # Handle chunk location format: "[start, end)"
     match = re.match(r'\[(\d+),\s*(\d+)\)', str(loc_str))
@@ -92,15 +111,10 @@ def location_to_lines(
     newline_index_cache: dict[str, list[int]],
 ) -> str:
     """Convert a location string into 1-indexed line ranges when possible."""
-    # Symbol location format: "line_start:line_end"
-    if ':' in str(loc_str) and '[' not in str(loc_str):
-        parts = str(loc_str).split(':')
-        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-            start_line = int(parts[0])
-            end_line = int(parts[1])
-            if end_line > start_line:
-                return f"L{start_line}-{end_line}"
-            return f"L{start_line}"
+    # Handle symbol location format
+    symbol_result = _parse_symbol_location(loc_str)
+    if symbol_result:
+        return symbol_result
 
     # Chunk range format: "[start, end)"
     match = re.match(r'\[(\d+),\s*(\d+)\)', str(loc_str))
@@ -133,9 +147,7 @@ def location_to_lines(
     start_line = bisect.bisect_right(newlines, start_off - 1) + 1
     end_line = bisect.bisect_right(newlines, end_off - 1) + 1
 
-    if end_line > start_line:
-        return f"L{start_line}-{end_line}"
-    return f"L{start_line}"
+    return _format_line_range(start_line, end_line)
 
 
 @dataclass
@@ -348,9 +360,9 @@ class SearchService:
         Balances relevance with diversity by penalizing results similar
         to already-selected ones (same category = similar).
         """
-        selected = []
+        selected: list[str] = []
         remaining = list(candidates)
-        category_counts: dict[str, int] = {}
+        category_counts: dict[str, int] = defaultdict(int)
 
         while len(selected) < k and remaining:
             best_file = None
@@ -360,7 +372,7 @@ class SearchService:
                 relevance = scores[candidate]
                 category = categories[candidate]
                 divisor = max(len(selected), 1)
-                diversity_penalty = category_counts.get(category, 0) / divisor
+                diversity_penalty = category_counts[category] / divisor
 
                 mmr_score = lambda_param * relevance - (1 - lambda_param) * diversity_penalty
 
@@ -371,8 +383,7 @@ class SearchService:
             if best_file:
                 selected.append(best_file)
                 remaining.remove(best_file)
-                category = categories[best_file]
-                category_counts[category] = category_counts.get(category, 0) + 1
+                category_counts[categories[best_file]] += 1
 
         return selected
 

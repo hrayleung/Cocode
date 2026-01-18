@@ -262,14 +262,21 @@ def hybrid_search(
 
     if all_failed:
         raise SearchError("All search backends failed")
-    if vector.failed:
-        logger.warning("Vector search failed, using BM25/symbol-only results")
-    if bm25.failed:
-        logger.warning("BM25 search failed, using vector/symbol-only results")
-    if symbol.attempted and symbol.failed:
-        logger.warning("Symbol search failed, using vector/BM25-only results")
 
-    logger.info(f"Search results: vector={len(vector.results)}, bm25={len(bm25.results)}, symbol={len(symbol.results)}")
+    # Log warnings for partial failures
+    failure_messages = {
+        "Vector": (vector.failed, "BM25/symbol-only"),
+        "BM25": (bm25.failed, "vector/symbol-only"),
+        "Symbol": (symbol.attempted and symbol.failed, "vector/BM25-only"),
+    }
+    for name, (failed, fallback) in failure_messages.items():
+        if failed:
+            logger.warning(f"{name} search failed, using {fallback} results")
+
+    logger.info(
+        f"Search results: vector={len(vector.results)}, "
+        f"bm25={len(bm25.results)}, symbol={len(symbol.results)}"
+    )
 
     # Prepare result lists and weights for RRF
     result_lists = [vector.results, bm25.results]
