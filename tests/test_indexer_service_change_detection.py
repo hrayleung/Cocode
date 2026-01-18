@@ -36,7 +36,8 @@ def test_has_files_changed_is_cached_for_back_to_back_queries(tmp_path, monkeypa
         return real_walk(*args, **kwargs)
 
     # Control monotonic time so the second call hits the cache window.
-    times = iter([0.0, 1.0])
+    # Cache window is 1 second, so use 0.5 second difference to stay within cache
+    times = iter([0.0, 0.5])
     monkeypatch.setattr(service_mod.time, "monotonic", lambda: next(times))
     monkeypatch.setattr(service_mod.os, "walk", counting_walk)
 
