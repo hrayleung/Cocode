@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import signal
 import sys
 from pathlib import Path
@@ -24,31 +25,54 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 MAX_SYMBOL_NAME_LENGTH = 500
+MAX_FILE_SIZE = 1024 * 1024  # 1MB
+VALID_SYMBOL_TYPES = {"function", "class", "method", "interface"}
+
+
+def _escape_like_pattern(s: str) -> str:
+    """Escape special characters for LIKE/ILIKE patterns."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
 
 mcp = FastMCP(
     "cocode-precise",
-    instructions="Precise code retrieval. Use get_symbol to get exact function/class code, or search_symbols to find symbols by name.",
+    instructions="Precise code retrieval. Use get_symbol to get exact function/class code by name, search_symbols to find symbols, list_symbols to browse, read_file to read source files.",
 )
 
 
 def _get_symbol_from_db(repo_name: str, symbol_name: str, symbol_type: str | None = None) -> list[dict]:
     """Query symbols table for matching symbols."""
     schema = sanitize_repo_name(repo_name)
+    escaped_name = _escape_like_pattern(symbol_name)
     
     with get_connection() as conn:
         with conn.cursor() as cur:
-            base_query = sql.SQL("""
-                SELECT symbol_name, symbol_type, filename, line_start, line_end, signature, docstring
-                FROM {schema}.symbols
-                WHERE symbol_name ILIKE %s
-            """).format(schema=sql.Identifier(schema))
-            
             if symbol_type:
-                query = sql.SQL("{} AND symbol_type = %s ORDER BY symbol_name LIMIT 20").format(base_query)
-                cur.execute(query, (f"%{symbol_name}%", symbol_type))
+                cur.execute(sql.SQL("""
+                    SELECT symbol_name, symbol_type, filename, line_start, line_end, signature, docstring
+                    FROM {schema}.symbols
+                    WHERE symbol_name ILIKE %s ESCAPE '\\' AND symbol_type = %s
+                    ORDER BY 
+                        CASE WHEN symbol_name = %s THEN 0 
+                             WHEN symbol_name ILIKE %s ESCAPE '\\' THEN 1 
+                             ELSE 2 END,
+                        symbol_name
+                    LIMIT 20
+                """).format(schema=sql.Identifier(schema)), 
+                (f"%{escaped_name}%", symbol_type, symbol_name, f"{escaped_name}%"))
             else:
-                query = sql.SQL("{} ORDER BY symbol_name LIMIT 20").format(base_query)
-                cur.execute(query, (f"%{symbol_name}%",))
+                cur.execute(sql.SQL("""
+                    SELECT symbol_name, symbol_type, filename, line_start, line_end, signature, docstring
+                    FROM {schema}.symbols
+                    WHERE symbol_name ILIKE %s ESCAPE '\\'
+                    ORDER BY 
+                        CASE WHEN symbol_name = %s THEN 0 
+                             WHEN symbol_name ILIKE %s ESCAPE '\\' THEN 1 
+                             ELSE 2 END,
+                        symbol_name
+                    LIMIT 20
+                """).format(schema=sql.Identifier(schema)), 
+                (f"%{escaped_name}%", symbol_name, f"{escaped_name}%"))
             
             return [
                 {
@@ -75,6 +99,16 @@ def _read_file_lines(filepath: Path, start: int, end: int) -> str:
     return "".join(lines[start_idx:end_idx])
 
 
+def _validate_symbol_type(symbol_type: str | None) -> str | None:
+    """Validate and normalize symbol_type parameter."""
+    if symbol_type is None:
+        return None
+    normalized = symbol_type.lower().strip()
+    if normalized not in VALID_SYMBOL_TYPES:
+        return None  # Ignore invalid types rather than error
+    return normalized
+
+
 @mcp.tool()
 async def get_symbol(
     symbol_name: str,
@@ -86,7 +120,7 @@ async def get_symbol(
     Args:
         symbol_name: Name of the function/class/method to retrieve (supports partial match)
         path: Path to the codebase (defaults to cwd)
-        symbol_type: Filter by type: 'function', 'class', or 'method' (optional)
+        symbol_type: Filter by type: 'function', 'class', 'method', or 'interface' (optional)
 
     Returns:
         List of matching symbols with their complete source code
@@ -95,6 +129,8 @@ async def get_symbol(
         return [{"error": "symbol_name cannot be empty"}]
     if len(symbol_name) > MAX_SYMBOL_NAME_LENGTH:
         return [{"error": f"symbol_name too long (max {MAX_SYMBOL_NAME_LENGTH})"}]
+    
+    validated_type = _validate_symbol_type(symbol_type)
     
     if path is None:
         path = os.getcwd()
@@ -107,7 +143,7 @@ async def get_symbol(
         if index_result.chunk_count == 0:
             return [{"error": f"No code files found in {path}"}]
 
-        symbols = _get_symbol_from_db(index_result.repo_name, symbol_name.strip(), symbol_type)
+        symbols = _get_symbol_from_db(index_result.repo_name, symbol_name.strip(), validated_type)
         
         if not symbols:
             return [{"message": f"No symbol found matching '{symbol_name}'"}]
@@ -152,19 +188,22 @@ async def search_symbols(
     symbol_type: str | None = None,
     top_k: int = 10,
 ) -> list[dict]:
-    """Search for symbols (functions/classes/methods) by semantic similarity.
+    """Search for symbols (functions/classes/methods) by name or signature keywords.
 
     Args:
-        query: Natural language description of what you're looking for
+        query: Keywords to search for in symbol names, signatures, or docstrings
         path: Path to the codebase (defaults to cwd)
-        symbol_type: Filter by type: 'function', 'class', or 'method' (optional)
-        top_k: Number of results to return (default: 10)
+        symbol_type: Filter by type: 'function', 'class', 'method', or 'interface' (optional)
+        top_k: Number of results to return (default: 10, max: 50)
 
     Returns:
         List of matching symbols with signatures and locations (use get_symbol to get full code)
     """
     if not query or not query.strip():
         return [{"error": "query cannot be empty"}]
+    
+    validated_type = _validate_symbol_type(symbol_type)
+    top_k = max(1, min(top_k, 50))
     
     if path is None:
         path = os.getcwd()
@@ -176,33 +215,35 @@ async def search_symbols(
         if index_result.chunk_count == 0:
             return [{"error": f"No code files found in {path}"}]
 
-        # Query symbols directly from database with text search
         schema = sanitize_repo_name(index_result.repo_name)
+        escaped_query = _escape_like_pattern(query.strip())
+        search_term = f"%{escaped_query}%"
         
         with get_connection() as conn:
             with conn.cursor() as cur:
-                # Use simple text matching for now
-                search_term = f"%{query.strip()}%"
-                
-                if symbol_type:
+                if validated_type:
                     cur.execute(sql.SQL("""
                         SELECT symbol_name, symbol_type, filename, line_start, line_end, signature, docstring
                         FROM {schema}.symbols
-                        WHERE (symbol_name ILIKE %s OR signature ILIKE %s OR COALESCE(docstring, '') ILIKE %s)
+                        WHERE (symbol_name ILIKE %s ESCAPE '\\' 
+                               OR signature ILIKE %s ESCAPE '\\' 
+                               OR COALESCE(docstring, '') ILIKE %s ESCAPE '\\')
                           AND symbol_type = %s
                         ORDER BY 
-                            CASE WHEN symbol_name ILIKE %s THEN 0 ELSE 1 END,
+                            CASE WHEN symbol_name ILIKE %s ESCAPE '\\' THEN 0 ELSE 1 END,
                             symbol_name
                         LIMIT %s
                     """).format(schema=sql.Identifier(schema)), 
-                    (search_term, search_term, search_term, symbol_type, search_term, top_k))
+                    (search_term, search_term, search_term, validated_type, search_term, top_k))
                 else:
                     cur.execute(sql.SQL("""
                         SELECT symbol_name, symbol_type, filename, line_start, line_end, signature, docstring
                         FROM {schema}.symbols
-                        WHERE symbol_name ILIKE %s OR signature ILIKE %s OR COALESCE(docstring, '') ILIKE %s
+                        WHERE symbol_name ILIKE %s ESCAPE '\\' 
+                           OR signature ILIKE %s ESCAPE '\\' 
+                           OR COALESCE(docstring, '') ILIKE %s ESCAPE '\\'
                         ORDER BY 
-                            CASE WHEN symbol_name ILIKE %s THEN 0 ELSE 1 END,
+                            CASE WHEN symbol_name ILIKE %s ESCAPE '\\' THEN 0 ELSE 1 END,
                             symbol_name
                         LIMIT %s
                     """).format(schema=sql.Identifier(schema)), 
@@ -220,7 +261,7 @@ async def search_symbols(
                 "filename": row[2],
                 "lines": f"L{row[3]}-{row[4]}",
                 "signature": row[5],
-                "docstring": row[6][:200] + "..." if row[6] and len(row[6]) > 200 else row[6],
+                "docstring": (row[6][:200] + "...") if row[6] and len(row[6]) > 200 else row[6],
             }
             for row in rows
         ]
@@ -244,15 +285,18 @@ async def list_symbols(
 
     Args:
         path: Path to the codebase (defaults to cwd)
-        filename: Filter to specific file (optional, relative path)
-        symbol_type: Filter by type: 'function', 'class', or 'method' (optional)
-        limit: Maximum number of symbols to return (default: 50)
+        filename: Filter to specific file (optional, relative path or partial match)
+        symbol_type: Filter by type: 'function', 'class', 'method', or 'interface' (optional)
+        limit: Maximum number of symbols to return (default: 50, max: 100)
 
     Returns:
         List of symbols with their signatures and locations
     """
     if path is None:
         path = os.getcwd()
+
+    validated_type = _validate_symbol_type(symbol_type)
+    limit = max(1, min(limit, 100))
 
     try:
         indexer = get_indexer()
@@ -269,17 +313,19 @@ async def list_symbols(
                 params = []
                 
                 if filename:
-                    conditions.append("filename ILIKE %s")
-                    params.append(f"%{filename}%")
-                if symbol_type:
-                    conditions.append("symbol_type = %s")
-                    params.append(symbol_type)
+                    escaped_filename = _escape_like_pattern(filename)
+                    conditions.append(sql.SQL("filename ILIKE %s ESCAPE '\\'"))
+                    params.append(f"%{escaped_filename}%")
+                if validated_type:
+                    conditions.append(sql.SQL("symbol_type = %s"))
+                    params.append(validated_type)
                 
-                where_clause = sql.SQL("WHERE {}").format(
-                    sql.SQL(" AND ").join(sql.SQL(c) for c in conditions)
-                ) if conditions else sql.SQL("")
+                if conditions:
+                    where_clause = sql.SQL("WHERE ") + sql.SQL(" AND ").join(conditions)
+                else:
+                    where_clause = sql.SQL("")
                 
-                params.append(min(limit, 100))
+                params.append(limit)
                 
                 query = sql.SQL("""
                     SELECT symbol_name, symbol_type, filename, line_start, line_end, signature
@@ -290,7 +336,6 @@ async def list_symbols(
                 """).format(schema=sql.Identifier(schema), where=where_clause)
                 
                 cur.execute(query, params)
-                
                 rows = cur.fetchall()
                 
         if not rows:
@@ -352,6 +397,11 @@ async def read_file(
         
         if not filepath.is_file():
             return {"error": f"Not a file: {filename}"}
+        
+        # Check file size
+        file_size = filepath.stat().st_size
+        if file_size > MAX_FILE_SIZE:
+            return {"error": f"File too large ({file_size} bytes, max {MAX_FILE_SIZE}). Use start_line/end_line to read portions."}
 
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -361,6 +411,8 @@ async def read_file(
         if start_line is not None or end_line is not None:
             start = max(1, start_line or 1)
             end = min(total_lines, end_line or total_lines)
+            if start > end:
+                return {"error": f"Invalid line range: start ({start}) > end ({end})"}
             content = "".join(lines[start-1:end])
             return {
                 "filename": filename,
