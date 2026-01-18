@@ -1,4 +1,12 @@
-"""Symbol extraction from source code using AST parsing."""
+"""Symbol extraction from source code using AST parsing.
+
+This module extracts function, class, and method definitions from code files
+using Tree-sitter for accurate AST parsing. Extracted symbols include:
+- Name, type, and signature
+- Line numbers (1-indexed, inclusive)
+- Docstrings and parent relationships
+- Visibility and category classification
+"""
 
 import logging
 from dataclasses import dataclass
@@ -16,16 +24,29 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Symbol:
-    """Represents a code symbol (function, class, method, etc.)."""
+    """Represents a code symbol (function, class, method, etc.).
+
+    Attributes:
+        symbol_name: Name of the symbol
+        symbol_type: Type: 'function', 'class', 'method', or 'interface'
+        line_start: Starting line number (1-indexed)
+        line_end: Ending line number (1-indexed, inclusive)
+        signature: Full signature line (e.g., "def foo(x: int) -> str:")
+        docstring: Extracted docstring if present
+        parent_symbol: Parent class name for methods
+        visibility: 'public', 'private', or 'internal'
+        category: 'implementation', 'test', 'api', or 'config'
+    """
+
     symbol_name: str
-    symbol_type: str  # 'function', 'class', 'method', 'interface'
+    symbol_type: str
     line_start: int
     line_end: int
     signature: str
     docstring: Optional[str] = None
     parent_symbol: Optional[str] = None
-    visibility: str = "public"  # 'public', 'private', 'internal'
-    category: str = "implementation"  # 'implementation', 'test', 'api', 'config'
+    visibility: str = "public"
+    category: str = "implementation"
 
 
 def extract_python_symbols(tree_root: Node, source_bytes: bytes, filename: str) -> list[Symbol]:

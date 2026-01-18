@@ -1,4 +1,8 @@
-"""PostgreSQL connection and helper functions."""
+"""PostgreSQL connection pool and database initialization.
+
+This module provides thread-safe connection pooling for PostgreSQL using psycopg3.
+The connection pool is lazily initialized and shared across the application.
+"""
 
 import logging
 import threading
@@ -11,13 +15,17 @@ from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-# Global connection pool
+# Global connection pool (thread-safe singleton)
 _pool: ConnectionPool | None = None
 _pool_lock = threading.Lock()
 
 
 def get_pool() -> ConnectionPool:
-    """Get or create the connection pool."""
+    """Get or create the connection pool (thread-safe singleton).
+
+    Returns:
+        ConnectionPool instance configured with database settings
+    """
     global _pool
     if _pool is None:
         with _pool_lock:
@@ -32,7 +40,7 @@ def get_pool() -> ConnectionPool:
 
 
 def close_pool() -> None:
-    """Close the connection pool."""
+    """Close the connection pool and release all connections."""
     global _pool
     with _pool_lock:
         if _pool is not None:
@@ -42,29 +50,24 @@ def close_pool() -> None:
 
 @contextmanager
 def get_connection() -> Iterator:
-    """Get a connection from the pool.
+    """Get a database connection from the pool.
 
-    Transaction behavior:
-    - By default, psycopg connections start in autocommit=False mode
-    - Changes must be committed explicitly with conn.commit()
-    - The connection is automatically returned to the pool on context exit
-    - Use conn.transaction() for explicit transaction boundaries
-    - Uncommitted changes are rolled back when the connection is returned
+    The connection is automatically returned to the pool when the context exits.
+    Uncommitted changes are rolled back automatically.
 
-    Usage:
-        # Explicit transaction management (recommended)
+    Transaction patterns:
+        # Explicit transaction (recommended)
         with get_connection() as conn:
             with conn.transaction():
-                cur.execute(...)  # Automatically committed on success
+                cur.execute(...)  # Auto-committed on success
 
-        # Manual commit/rollback
+        # Manual commit
         with get_connection() as conn:
-            try:
-                cur.execute(...)
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+            cur.execute(...)
+            conn.commit()
+
+    Yields:
+        Database connection from the pool
     """
     pool = get_pool()
     with pool.connection() as conn:
@@ -72,19 +75,24 @@ def get_connection() -> Iterator:
 
 
 def init_db() -> None:
-    """Initialize the database with required extensions and tables."""
+    """Initialize database with required extensions and tables.
+
+    Creates:
+        - pgvector extension for vector similarity search
+        - pgcrypto extension for UUID generation
+        - Core application tables (repos, etc.)
+        - Code-specific text search configuration
+    """
     from .schema import create_tables
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-            # Ensure required extensions exist
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-            # pgcrypto provides gen_random_uuid() for PostgreSQL < 13
             cur.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
         conn.commit()
         create_tables(conn)
 
-    # Set up code-specific text search configuration
+    # Set up code-aware full-text search
     try:
         from src.retrieval.fts_setup import create_code_text_search_config
         create_code_text_search_config()
