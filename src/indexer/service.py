@@ -4,6 +4,7 @@ import fnmatch
 import hashlib
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -91,6 +92,13 @@ class IndexerService:
                 return hashed
         return f"{base}_{digest}"
 
+    def _get_repo_safe(self, name: str):
+        """Safely get repo, returning None on error."""
+        try:
+            return self._repo_manager.get_repo(name)
+        except Exception:
+            return None
+
     def _validate_path(self, path: str) -> Path:
         resolved = Path(path).resolve()
         if not resolved.exists():
@@ -141,6 +149,7 @@ class IndexerService:
         last_ts = self._datetime_to_timestamp(repo.last_indexed)
         now = time.monotonic()
 
+        # Check cache (5 second TTL)
         cached = self._change_check_cache.get(repo_name)
         if cached and cached[0] == last_ts and (now - cached[1]) < 5.0:
             return cached[2]

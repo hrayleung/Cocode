@@ -6,16 +6,16 @@ from code files, with embeddings for symbol-level search.
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 from psycopg import sql
 
-from src.parser.symbol_extractor import extract_symbols, Symbol
-from src.parser.ast_parser import get_language_from_file
-from src.storage.postgres import get_connection
-from src.storage.schema import get_create_symbols_table_sql
-from src.embeddings.provider import get_provider
 from config.settings import settings
+from src.embeddings.provider import get_provider
+from src.parser.ast_parser import get_language_from_file
+from src.parser.symbol_extractor import Symbol, extract_symbols
+from src.storage.postgres import get_connection
+from src.storage.schema import get_create_symbols_table_sql, sanitize_repo_name
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ def index_file_symbols(
     repo_name: str,
     filename: str,
     content: str,
-    embedding_provider: Optional[any] = None,
+    embedding_provider: Any | None = None,
 ) -> int:
     """Extract and index symbols from a single file.
 
@@ -114,17 +114,12 @@ def index_file_symbols(
     symbol_texts = [generate_symbol_text(sym, filename) for sym in symbols]
 
     try:
-        # Generate embeddings in batch
         embeddings = embedding_provider.get_embeddings_batch(symbol_texts)
-
-        # Insert symbols into database
-        from src.storage.schema import sanitize_repo_name
         schema_name = sanitize_repo_name(repo_name)
         symbols_table = sql.Identifier(schema_name, "symbols")
 
         with get_connection() as conn:
             with conn.cursor() as cur:
-                # Prepare insert statement
                 insert_sql = sql.SQL("""
                     INSERT INTO {table} (
                         filename, symbol_name, symbol_type, line_start, line_end,
@@ -147,31 +142,14 @@ def index_file_symbols(
                         updated_at = CURRENT_TIMESTAMP
                 """).format(table=symbols_table)
 
-                # Batch insert
                 for symbol, embedding in zip(symbols, embeddings):
-                    # Create search text (signature + docstring)
-                    search_text = symbol.signature
-                    if symbol.docstring:
-                        search_text += " " + symbol.docstring
-
-                    cur.execute(
-                        insert_sql,
-                        (
-                            filename,
-                            symbol.symbol_name,
-                            symbol.symbol_type,
-                            symbol.line_start,
-                            symbol.line_end,
-                            symbol.signature,
-                            symbol.docstring,
-                            symbol.parent_symbol,
-                            symbol.visibility,
-                            symbol.category,
-                            embedding,
-                            search_text,
-                        ),
-                    )
-
+                    search_text = f"{symbol.signature} {symbol.docstring}" if symbol.docstring else symbol.signature
+                    cur.execute(insert_sql, (
+                        filename, symbol.symbol_name, symbol.symbol_type,
+                        symbol.line_start, symbol.line_end, symbol.signature,
+                        symbol.docstring, symbol.parent_symbol, symbol.visibility,
+                        symbol.category, embedding, search_text,
+                    ))
             conn.commit()
 
         logger.info(f"Indexed {len(symbols)} symbols from {filename}")
@@ -192,15 +170,12 @@ def delete_file_symbols(repo_name: str, filename: str) -> int:
     Returns:
         Number of symbols deleted
     """
-    from src.storage.schema import sanitize_repo_name
     schema_name = sanitize_repo_name(repo_name)
     symbols_table = sql.Identifier(schema_name, "symbols")
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-            delete_sql = sql.SQL("DELETE FROM {table} WHERE filename = %s").format(
-                table=symbols_table
-            )
+            delete_sql = sql.SQL("DELETE FROM {table} WHERE filename = %s").format(table=symbols_table)
             cur.execute(delete_sql, (filename,))
             deleted_count = cur.rowcount
         conn.commit()
@@ -209,11 +184,16 @@ def delete_file_symbols(repo_name: str, filename: str) -> int:
     return deleted_count
 
 
+def _is_file_excluded(relative_path: Path, excluded_patterns: list[str]) -> bool:
+    """Check if a file path matches any exclusion pattern."""
+    return any(relative_path.match(pattern) for pattern in excluded_patterns)
+
+
 def index_repository_symbols(
     repo_name: str,
     repo_path: str,
-    included_patterns: Optional[list[str]] = None,
-    excluded_patterns: Optional[list[str]] = None,
+    included_patterns: list[str] | None = None,
+    excluded_patterns: list[str] | None = None,
 ) -> dict:
     """Index symbols for all files in a repository.
 
@@ -240,40 +220,25 @@ def index_repository_symbols(
     from src.retrieval.graph_cache import create_graph_cache_table
     create_graph_cache_table(repo_name)
 
-    # Get files to process
     if included_patterns is None:
         included_patterns = [f"**/*{ext}" for ext in settings.included_extensions]
     if excluded_patterns is None:
         excluded_patterns = settings.excluded_patterns
 
     repo_path_obj = Path(repo_path)
-    files_to_process = []
-
-    for pattern in included_patterns:
-        for file_path in repo_path_obj.glob(pattern):
-            if file_path.is_file():
-                # Check if excluded
-                relative_path = file_path.relative_to(repo_path_obj)
-                excluded = False
-                for exclude_pattern in excluded_patterns:
-                    if relative_path.match(exclude_pattern):
-                        excluded = True
-                        break
-
-                if not excluded:
-                    files_to_process.append(file_path)
+    files_to_process = [
+        file_path
+        for pattern in included_patterns
+        for file_path in repo_path_obj.glob(pattern)
+        if file_path.is_file() and not _is_file_excluded(file_path.relative_to(repo_path_obj), excluded_patterns)
+    ]
 
     if not files_to_process:
         logger.warning(f"No files found to process in {repo_path}")
         return {"files_processed": 0, "symbols_indexed": 0, "errors": 0}
 
-    # Get embedding provider (shared across files)
     embedding_provider = get_provider()
-
-    # Process files
-    files_processed = 0
-    symbols_indexed = 0
-    errors = 0
+    stats = {"files_processed": 0, "symbols_indexed": 0, "errors": 0}
 
     logger.info(f"Indexing symbols for {len(files_to_process)} files in {repo_name}")
 
@@ -281,24 +246,14 @@ def index_repository_symbols(
         try:
             content = file_path.read_text(encoding="utf-8")
             relative_path = str(file_path.relative_to(repo_path_obj))
-
-            count = index_file_symbols(
-                repo_name, relative_path, content, embedding_provider
-            )
-            files_processed += 1
-            symbols_indexed += count
-
+            count = index_file_symbols(repo_name, relative_path, content, embedding_provider)
+            stats["files_processed"] += 1
+            stats["symbols_indexed"] += count
         except Exception as e:
             logger.error(f"Error processing {file_path}: {e}")
-            errors += 1
+            stats["errors"] += 1
 
-    logger.info(
-        f"Symbol indexing complete: {files_processed} files, "
-        f"{symbols_indexed} symbols, {errors} errors"
-    )
+    logger.info(f"Symbol indexing complete: {stats['files_processed']} files, "
+                f"{stats['symbols_indexed']} symbols, {stats['errors']} errors")
 
-    return {
-        "files_processed": files_processed,
-        "symbols_indexed": symbols_indexed,
-        "errors": errors,
-    }
+    return stats

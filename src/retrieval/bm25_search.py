@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 
+from psycopg import sql as psycopg_sql
+
 from src.exceptions import SearchError
 from src.storage.postgres import get_connection
 
