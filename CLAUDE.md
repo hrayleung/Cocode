@@ -52,7 +52,7 @@ Both services use the singleton pattern via `get_indexer()` and `get_searcher()`
 The search pipeline applies multiple ranking strategies in sequence. **Critical**: Both centrality and category boosting happen BEFORE reranking to ensure proper prioritization.
 
 ```
-Query → get_query_embedding() [Jina if available, else OpenAI]
+Query → get_query_embedding() [selected provider]
          ↓
        [Parallel ThreadPoolExecutor - max_workers=3]
        ├─ vector_search() (pgvector cosine similarity on chunks)
@@ -72,13 +72,13 @@ Query → get_query_embedding() [Jina if available, else OpenAI]
        expand_with_graph() [adds related files via multi-hop import traversal (up to 3 hops)]
 ```
 
-Core ranking pipeline: `src/retrieval/hybrid.py:160-257` (RRF → centrality → category → rerank)
+Core ranking pipeline: `src/retrieval/hybrid.py` (`hybrid_search`; RRF → centrality → category → rerank)
 Symbol search: `src/retrieval/symbol_search.py` (vector + BM25 on symbols)
-Post-processing: `src/retrieval/service.py:117-193` (aggregate → graph expansion)
+Post-processing: `src/retrieval/service.py` (aggregate → graph expansion)
 
 ### Database Tables
 
-All tables defined in `src/storage/schema.py`:
+Tables used by cocode (PostgreSQL):
 
 **repos table**:
 - Core fields: id, name, path, status
@@ -86,13 +86,11 @@ All tables defined in `src/storage/schema.py`:
 - Stats: file_count, chunk_count
 - error_message (for tracking failures)
 
-**{schema}.chunks table** (per-repo):
-- Content: filename, location, content
-- Search indexes:
-  - `embedding` (vector) + HNSW index for vector similarity
-  - `content_tsv` (tsvector) + GIN index for BM25 keyword search
-- Timestamps: created_at, updated_at
-- Additional index on filename for efficient file lookups
+**CocoIndex-managed chunks table** (per-repo, public schema):
+- `codeindex_{repo}__{repo}_chunks`
+  - Content: filename, location, content, embedding (pgvector)
+  - Indexes: HNSW on embedding; BM25 may add `content_tsv` + GIN lazily on first search
+- `codeindex_{repo}__cocoindex_tracking` (CocoIndex internal)
 
 **{schema}.symbols table** (per-repo, enabled by default):
 - Symbol metadata: symbol_name, symbol_type (function/class/method), signature, docstring
@@ -119,7 +117,7 @@ All tables defined in `src/storage/schema.py`:
 - Invalidated when files change during incremental indexing
 - 30-50% faster graph queries via caching
 
-**{repo}_centrality table** (optional, created on-demand):
+**{repo}_centrality table** (optional, created on-demand, public schema):
 - Per-repo PageRank scores for graph-based boosting
 
 ### Embedding Strategies
@@ -151,13 +149,14 @@ All providers validate API keys on startup and fall back to OpenAI if validation
 - Replaces regex-based import extraction with Tree-sitter AST parsing
 - Handles edge cases: dynamic imports, conditional imports, aliased imports, nested structures
 - Falls back to regex if AST parsing unavailable or fails
-- Supports 8 languages: Python, Go, Rust, C, C++, JavaScript, TypeScript, Java
+- Supports 8 languages: Python, Go, Rust, C, C++, JavaScript, TypeScript, TSX
 
 **Symbol Extraction** (`src/parser/symbol_extractor.py`):
 - Extracts symbol metadata: name, type, signature, docstring, parent class, visibility
 - Detects test symbols (functions starting with `test_`, classes ending with `Test`)
 - Categorizes symbols: implementation, test, api, internal
 - Line number accuracy: 1-indexed, inclusive (matches IDE conventions)
+- Currently implemented for: Python and Go
 
 ### Ranking Features
 
@@ -200,38 +199,18 @@ Computes PageRank scores from import relationships to identify structurally impo
   - 0.5 = Unresolved (external library, dynamic call)
 - Stores call edges in edges table with context
 - Query APIs: `get_callers()`, `get_callees()`, `trace_call_chain()`
-
-**Call Graph Indexing** (`src/indexer/call_graph_indexing.py`):
-- Extracts call edges during symbol indexing
-- Resolves call targets using symbol table
-- Incremental updates: invalidates edges when files change
-
-### Agentic Code Understanding
-
-**Agentic Tools** (`src/agentic/tools.py`):
-- `agentic_context(query)`: LLM-powered code analysis
-  - Searches symbol index for relevant code
-  - Uses GPT-4o-mini to synthesize comprehensive answers
-  - Returns structured results with code locations and findings
-- `analyze_call_chain(function_name)`: Call chain analysis
-  - Traces function calls up to configurable depth
-  - Returns call tree with precise locations
-
-**Features**:
-- Combines symbol search + call graph + LLM reasoning
-- Answers complex questions: "How does authentication work?"
-- Provides code pointers with file:line references
-- Confidence scoring for reliability
+- Note: `src/indexer/call_graph_indexing.py` contains call-edge extraction/indexing logic, but it is not currently wired into the main indexing flow.
 
 ## Environment Variables
 
-Required (one of):
-- `OPENAI_API_KEY` - For OpenAI embeddings (fallback)
+Required (embeddings):
+- `OPENAI_API_KEY` OR (`JINA_API_KEY` with `USE_LATE_CHUNKING=true`)
 
 Embedding Provider (choose one):
 - `JINA_API_KEY` - For Jina late chunking embeddings
 - `MISTRAL_API_KEY` - For Mistral Codestral Embed
 - `EMBEDDING_PROVIDER` - Select provider: `jina`, `mistral`, or `openai` (default: `jina`)
+- `USE_LATE_CHUNKING` - Required for Jina selection (default: `true`)
 
 Database:
 - `COCOINDEX_DATABASE_URL` - PostgreSQL with pgvector (default: `postgresql://localhost:5432/cocode`)
