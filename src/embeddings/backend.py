@@ -21,6 +21,7 @@ def _validate_api(url: str, api_key: str, payload: dict) -> bool:
     """Validate an embedding API by making a test request."""
     if not api_key:
         return False
+
     try:
         response = httpx.post(
             url,
@@ -28,10 +29,7 @@ def _validate_api(url: str, api_key: str, payload: dict) -> bool:
             json=payload,
             timeout=10.0,
         )
-        if response.status_code != 200:
-            logger.warning(f"API at {url} returned {response.status_code}")
-            return False
-        return True
+        return response.status_code == 200
     except Exception as e:
         logger.warning(f"API validation failed for {url}: {e}")
         return False

@@ -70,26 +70,27 @@ class IndexerService:
         base = self.path_to_repo_name(resolved_str)
         digest = hashlib.sha1(resolved_str.encode("utf-8")).hexdigest()
 
-        def get_repo_safe(name: str):
-            try:
-                return self._repo_manager.get_repo(name)
-            except Exception:
-                return None
-
         # Check existing registrations
         for name in [base] + [f"{base}_{digest[:n]}" for n in (8, 12, 16, 40)]:
-            existing = get_repo_safe(name)
+            existing = self._get_repo_safe(name)
             if existing and existing.path == resolved_str:
                 return name
 
         # Find available name
-        if get_repo_safe(base) is None:
+        if self._get_repo_safe(base) is None:
             return base
         for n in (8, 12, 16, 40):
             hashed = f"{base}_{digest[:n]}"
-            if get_repo_safe(hashed) is None:
+            if self._get_repo_safe(hashed) is None:
                 return hashed
         return f"{base}_{digest}"
+
+    def _get_repo_safe(self, name: str):
+        """Safely get repo, returning None on error."""
+        try:
+            return self._repo_manager.get_repo(name)
+        except Exception:
+            return None
 
     def _validate_path(self, path: str) -> Path:
         resolved = Path(path).resolve()
@@ -145,24 +146,25 @@ class IndexerService:
         last_ts = self._datetime_to_timestamp(repo.last_indexed)
         now = time.monotonic()
 
-        # Cache for 1 second to avoid redundant checks while keeping changes responsive
+        # Check cache (1 second TTL)
         cached = self._change_check_cache.get(repo_name)
         if cached and cached[0] == last_ts and (now - cached[1]) < 1.0:
             return cached[2]
 
-        changed = False
+        changed = self._check_files_modified(repo_path, last_ts)
+        self._change_check_cache[repo_name] = (last_ts, now, changed)
+        return changed
+
+    def _check_files_modified(self, repo_path: str, last_ts: float) -> bool:
+        """Check if any relevant files have been modified since last_ts."""
         for full_path, _ in self._iter_relevant_files(repo_path):
             try:
                 if full_path.stat().st_mtime > last_ts:
-                    changed = True
-                    break
+                    return True
             except OSError:
                 # File access error - assume changed to trigger re-index
-                changed = True
-                break
-
-        self._change_check_cache[repo_name] = (last_ts, now, changed)
-        return changed
+                return True
+        return False
 
     @staticmethod
     def _datetime_to_timestamp(value: datetime) -> float:
