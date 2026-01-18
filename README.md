@@ -52,8 +52,8 @@ This combination enables fast, accurate semantic search that stays up-to-date as
 
 ```bash
 # Clone and install
-git clone <repo-url>
-cd cocode
+git clone https://github.com/hrayleung/Cocode.git
+cd Cocode
 pip install -e ".[dev]"
 
 # Create .env file
