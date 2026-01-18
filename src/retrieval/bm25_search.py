@@ -85,8 +85,10 @@ def _has_bm25_index(table_name: str) -> bool:
 
 def _search_pg_search(table_name: str, tokens: list[str], top_k: int) -> list[SearchResult]:
     """Search using ParadeDB pg_search extension."""
-    if not tokens or not _has_bm25_index(table_name):
-        return _search_native_fts(table_name, tokens, top_k) if tokens else []
+    if not tokens:
+        return []
+    if not _has_bm25_index(table_name):
+        return _search_native_fts(table_name, tokens, top_k)
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -102,8 +104,10 @@ def _search_pg_search(table_name: str, tokens: list[str], top_k: int) -> list[Se
 
 def _search_pg_textsearch(table_name: str, tokens: list[str], top_k: int) -> list[SearchResult]:
     """Search using pg_textsearch extension."""
-    if not tokens or not _has_bm25_index(table_name):
-        return _search_native_fts(table_name, tokens, top_k) if tokens else []
+    if not tokens:
+        return []
+    if not _has_bm25_index(table_name):
+        return _search_native_fts(table_name, tokens, top_k)
 
     search_query = " ".join(tokens)
     with get_connection() as conn:
