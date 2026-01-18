@@ -4,10 +4,12 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 
+from psycopg import sql as psycopg_sql
+
 from config.settings import settings
+from src.retrieval.vector_search import get_chunks_table_name
 from src.storage.postgres import get_connection
 from src.storage.schema import get_create_chunks_table_sql, get_create_schema_sql
-from src.retrieval.vector_search import get_chunks_table_name
 
 logger = logging.getLogger(__name__)
 
@@ -102,58 +104,54 @@ class RepoManager:
         """Update repository status."""
         with get_connection() as conn:
             with conn.cursor() as cur:
-                updates = ["status = %s"]
+                # Build update clauses safely using sql.SQL
+                update_parts = [psycopg_sql.SQL("status = %s")]
                 params = [status]
 
                 if status == "ready":
-                    updates.append("last_indexed = (NOW() AT TIME ZONE 'UTC')")
+                    update_parts.append(psycopg_sql.SQL("last_indexed = (NOW() AT TIME ZONE 'UTC')"))
 
                 if file_count is not None:
-                    updates.append("file_count = %s")
+                    update_parts.append(psycopg_sql.SQL("file_count = %s"))
                     params.append(file_count)
 
                 if chunk_count is not None:
-                    updates.append("chunk_count = %s")
+                    update_parts.append(psycopg_sql.SQL("chunk_count = %s"))
                     params.append(chunk_count)
 
                 if error_message is not None:
-                    updates.append("error_message = %s")
+                    update_parts.append(psycopg_sql.SQL("error_message = %s"))
                     params.append(error_message)
                 elif status != "error":
-                    updates.append("error_message = NULL")
+                    update_parts.append(psycopg_sql.SQL("error_message = NULL"))
 
                 params.append(name)
 
-                cur.execute(
-                    f"UPDATE repos SET {', '.join(updates)} WHERE name = %s",
-                    params,
+                # Safely construct the query
+                query = psycopg_sql.SQL("UPDATE repos SET {updates} WHERE name = %s").format(
+                    updates=psycopg_sql.SQL(", ").join(update_parts)
                 )
+                cur.execute(query, params)
             conn.commit()
 
     def get_chunk_count(self, name: str) -> int:
         """Get number of indexed chunks for a repository."""
-        table_name = get_chunks_table_name(name)
-
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                try:
-                    cur.execute(f"SELECT COUNT(*) FROM {table_name}")
-                    return cur.fetchone()[0]
-                except Exception as e:
-                    logger.debug(f"Error counting chunks for {name}: {e}")
-                    return 0
+        return self._execute_count_query(name, "SELECT COUNT(*) FROM {}")
 
     def get_file_count(self, name: str) -> int:
         """Get number of unique files indexed for a repository."""
-        table_name = get_chunks_table_name(name)
+        return self._execute_count_query(name, "SELECT COUNT(DISTINCT filename) FROM {}")
 
+    def _execute_count_query(self, name: str, query_template: str) -> int:
+        """Execute a count query on the chunks table."""
+        table_name = get_chunks_table_name(name)
         with get_connection() as conn:
             with conn.cursor() as cur:
                 try:
-                    cur.execute(f"SELECT COUNT(DISTINCT filename) FROM {table_name}")
+                    cur.execute(query_template.format(table_name))
                     return cur.fetchone()[0]
                 except Exception as e:
-                    logger.debug(f"Error counting files for {name}: {e}")
+                    logger.debug(f"Error executing count query for {name}: {e}")
                     return 0
 
     @staticmethod

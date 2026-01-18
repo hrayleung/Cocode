@@ -4,6 +4,7 @@ import fnmatch
 import hashlib
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -57,7 +58,6 @@ class IndexerService:
     @staticmethod
     def path_to_repo_name(path: str) -> str:
         """Convert a path to a consistent repository name."""
-        import re
         name = Path(path).resolve().name.lower()
         name = re.sub(r'[-. ]+', '_', name)
         name = re.sub(r'[^a-z0-9_]', '', name).strip('_')
@@ -133,7 +133,11 @@ class IndexerService:
                     yield full_path, str(relative)
 
     def _has_files_changed(self, repo_name: str, repo_path: str) -> bool:
-        """Check if any indexed files have changed since last indexing."""
+        """Check if any indexed files have changed since last indexing.
+
+        Uses a 1-second cache to avoid redundant filesystem scans in quick succession
+        while remaining responsive to actual file changes.
+        """
         repo = self._repo_manager.get_repo(repo_name)
         if not (repo and repo.last_indexed):
             return False
@@ -141,8 +145,9 @@ class IndexerService:
         last_ts = self._datetime_to_timestamp(repo.last_indexed)
         now = time.monotonic()
 
+        # Cache for 1 second to avoid redundant checks while keeping changes responsive
         cached = self._change_check_cache.get(repo_name)
-        if cached and cached[0] == last_ts and (now - cached[1]) < 5.0:
+        if cached and cached[0] == last_ts and (now - cached[1]) < 1.0:
             return cached[2]
 
         changed = False
@@ -152,6 +157,7 @@ class IndexerService:
                     changed = True
                     break
             except OSError:
+                # File access error - assume changed to trigger re-index
                 changed = True
                 break
 
@@ -298,8 +304,8 @@ class IndexerService:
                     try:
                         content = file_path.read_text(encoding="utf-8")
                         index_file_symbols(repo_name, rel_path, content, embedding_provider=provider)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Failed to index symbols for {rel_path}: {e}")
         except Exception as e:
             logger.warning(f"Symbol indexing failed for {repo_name}: {e}")
 
