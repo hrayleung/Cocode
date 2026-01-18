@@ -27,10 +27,7 @@ def apply_centrality_boost(
     repo_name: str,
     weight: float = 1.0,
 ) -> None:
-    """Apply centrality-based boosting to search results in-place.
-
-    Files imported by many others get boosted, peripheral files get penalized.
-    """
+    """Apply centrality-based boosting to search results in-place."""
     if not results or weight == 0:
         return
 
@@ -39,8 +36,7 @@ def apply_centrality_boost(
 
     for result in results:
         centrality = scores.get(result.filename, 1.0)
-        adjusted = 1.0 + (centrality - 1.0) * weight
-        result.score *= adjusted
+        result.score *= 1.0 + (centrality - 1.0) * weight
 
 
 def get_query_embedding(query: str) -> list[float]:
@@ -48,12 +44,8 @@ def get_query_embedding(query: str) -> list[float]:
     from src.embeddings.openai import get_embedding as get_embedding_openai
 
     provider = get_provider()
-
-    # OpenAI provider: use query context for better retrieval
     if isinstance(provider, OpenAIProvider):
         return get_embedding_openai(query, add_query_context=True)
-
-    # Jina provider: keep consistent with the index embedding space
     return provider.get_embedding(query)
 
 
@@ -62,33 +54,26 @@ def reciprocal_rank_fusion(
     k: int = 40,
     weights: list[float] | None = None,
 ) -> list[SearchResult]:
-    """Combine multiple result lists using Reciprocal Rank Fusion (RRF).
-
-    RRF score = sum(weight * 1 / (k + rank)) for each list
-    """
+    """Combine multiple result lists using Reciprocal Rank Fusion (RRF)."""
     if not result_lists:
         return []
 
-    # Normalize weights or use uniform distribution
     if weights is None:
         weights = [1.0] * len(result_lists)
     else:
         total = sum(weights)
-        uniform = 1.0 / len(result_lists)
-        weights = [w / total if total > 0 else uniform for w in weights]
+        weights = [w / total if total > 0 else 1.0 / len(result_lists) for w in weights]
 
     scores: dict[str, float] = defaultdict(float)
     results_map: dict[str, SearchResult] = {}
 
     for weight, results in zip(weights, result_lists):
         for rank, result in enumerate(results):
-            content_hash = hash(result.content.strip())
-            key = f"{result.filename}:{result.location}:{content_hash}"
-            scores[key] += weight * (1.0 / (k + rank + 1))
+            key = f"{result.filename}:{result.location}:{hash(result.content.strip())}"
+            scores[key] += weight / (k + rank + 1)
             if key not in results_map or result.score > results_map[key].score:
                 results_map[key] = result
 
-    sorted_keys = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
     return [
         SearchResult(
             filename=results_map[key].filename,
@@ -96,7 +81,7 @@ def reciprocal_rank_fusion(
             content=results_map[key].content,
             score=scores[key],
         )
-        for key in sorted_keys
+        for key in sorted(scores, key=scores.get, reverse=True)
     ]
 
 
@@ -106,6 +91,33 @@ class SearchOutcome:
     results: list[SearchResult] = field(default_factory=list)
     failed: bool = False
     attempted: bool = True
+
+
+class _EmbeddingCache:
+    """Thread-safe cache for query embedding."""
+
+    def __init__(self, query: str):
+        self._query = query
+        self._embedding: list[float] | None = None
+        self._error: Exception | None = None
+        self._lock = threading.Lock()
+
+    def get(self) -> list[float]:
+        if self._error:
+            raise self._error
+        if self._embedding:
+            return self._embedding
+
+        with self._lock:
+            if self._error:
+                raise self._error
+            if self._embedding is None:
+                try:
+                    self._embedding = get_query_embedding(self._query)
+                except Exception as e:
+                    self._error = e
+                    raise
+            return self._embedding
 
 
 def _execute_search(
@@ -121,42 +133,19 @@ def _execute_search(
 
 
 def _run_searches_parallel(
-    vector_fn: Callable[[], list[SearchResult]],
-    bm25_fn: Callable[[], list[SearchResult]],
-    symbol_fn: Callable[[], list[SearchResult]] | None = None,
-) -> tuple[SearchOutcome, SearchOutcome, SearchOutcome]:
-    """Run vector, BM25, and symbol searches in parallel."""
-    max_workers = 3 if symbol_fn else 2
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_vector = executor.submit(vector_fn)
-        future_bm25 = executor.submit(bm25_fn)
-        future_symbol = executor.submit(symbol_fn) if symbol_fn else None
-
-        vector = SearchOutcome()
-        bm25 = SearchOutcome()
-        symbol = SearchOutcome(attempted=symbol_fn is not None)
-
-        try:
-            vector.results = future_vector.result(timeout=30)
-        except Exception as e:
-            logger.warning(f"Vector search failed: {e}")
-            vector.failed = True
-
-        try:
-            bm25.results = future_bm25.result(timeout=30)
-        except Exception as e:
-            logger.warning(f"BM25 search failed: {e}")
-            bm25.failed = True
-
-        if future_symbol:
+    searches: list[tuple[str, Callable[[], list[SearchResult]]]],
+) -> dict[str, SearchOutcome]:
+    """Run searches in parallel and return outcomes by name."""
+    outcomes = {}
+    with ThreadPoolExecutor(max_workers=len(searches)) as executor:
+        futures = {name: executor.submit(fn) for name, fn in searches}
+        for name, future in futures.items():
             try:
-                symbol.results = future_symbol.result(timeout=30)
+                outcomes[name] = SearchOutcome(results=future.result(timeout=30))
             except Exception as e:
-                logger.warning(f"Symbol search failed: {e}")
-                symbol.failed = True
-
-    return vector, bm25, symbol
+                logger.warning(f"{name} search failed: {e}")
+                outcomes[name] = SearchOutcome(failed=True)
+    return outcomes
 
 
 def hybrid_search(
@@ -171,125 +160,53 @@ def hybrid_search(
     parallel: bool = True,
     include_symbols: bool = True,
 ) -> list[SearchResult]:
-    """Perform hybrid search combining vector, BM25, and symbol searches with optional reranking.
-
-    Args:
-        repo_name: Repository name
-        query: Search query
-        top_k: Number of results to return
-        use_reranker: Whether to use Cohere reranker
-        rerank_candidates: Number of candidates to rerank
-        vector_weight: Weight for vector search (default from settings)
-        bm25_weight: Weight for BM25 search (default from settings)
-        symbol_weight: Weight for symbol search (default from settings)
-        parallel: Run searches in parallel
-        include_symbols: Include symbol-level search
-
-    Returns:
-        Ranked search results
-    """
+    """Perform hybrid search combining vector, BM25, and symbol searches."""
     rerank_count = rerank_candidates or settings.rerank_candidates
-    vec_weight = vector_weight if vector_weight is not None else settings.vector_weight
-    bm_weight = bm25_weight if bm25_weight is not None else settings.bm25_weight
-    sym_weight = symbol_weight if symbol_weight is not None else settings.symbol_weight
+    vec_w = vector_weight if vector_weight is not None else settings.vector_weight
+    bm25_w = bm25_weight if bm25_weight is not None else settings.bm25_weight
+    sym_w = symbol_weight if symbol_weight is not None else settings.symbol_weight
 
-    query_embedding: list[float] | None = None
-    query_embedding_error: Exception | None = None
-    query_embedding_lock = threading.Lock()
-
-    def get_query_embedding_cached() -> list[float]:
-        nonlocal query_embedding, query_embedding_error
-        if query_embedding_error is not None:
-            raise query_embedding_error
-        if query_embedding is not None:
-            return query_embedding
-        with query_embedding_lock:
-            if query_embedding_error is not None:
-                raise query_embedding_error
-            if query_embedding is None:
-                try:
-                    query_embedding = get_query_embedding(query)
-                except Exception as e:
-                    query_embedding_error = e
-                    raise
-            return query_embedding
+    embedding_cache = _EmbeddingCache(query)
     bm25_config = BM25Config(k1=settings.bm25_k1, b=settings.bm25_b)
+    include_sym = include_symbols and settings.enable_symbol_indexing
 
-    symbols_attempted = include_symbols and settings.enable_symbol_indexing
+    def run_vector():
+        return vector_search(repo_name, query, top_k=rerank_count, query_embedding=embedding_cache.get())
 
-    def run_vector() -> list[SearchResult]:
-        return vector_search(
-            repo_name,
-            query,
-            top_k=rerank_count,
-            query_embedding=get_query_embedding_cached(),
-        )
-
-    def run_bm25() -> list[SearchResult]:
+    def run_bm25():
         return bm25_search(repo_name, query, top_k=rerank_count, config=bm25_config)
 
-    def run_symbol() -> list[SearchResult]:
-        if not symbols_attempted:
-            return []
-        return symbol_hybrid_search(
-            repo_name,
-            query,
-            top_k=rerank_count,
-            query_embedding=get_query_embedding_cached(),
-        )
+    def run_symbol():
+        return symbol_hybrid_search(repo_name, query, top_k=rerank_count, query_embedding=embedding_cache.get())
+
+    # Execute searches
+    searches = [("vector", run_vector), ("bm25", run_bm25)]
+    if include_sym:
+        searches.append(("symbol", run_symbol))
 
     if parallel:
-        vector, bm25, symbol = _run_searches_parallel(
-            run_vector, run_bm25, run_symbol if symbols_attempted else None
-        )
+        outcomes = _run_searches_parallel(searches)
     else:
-        logger.debug(f"Running vector search for '{query}' in {repo_name}")
-        vector = _execute_search(run_vector, "Vector")
-        logger.debug(f"Running BM25 search for '{query}' in {repo_name}")
-        bm25 = _execute_search(run_bm25, "BM25")
-        if symbols_attempted:
-            logger.debug(f"Running symbol search for '{query}' in {repo_name}")
-            symbol = _execute_search(run_symbol, "Symbol")
-        else:
-            symbol = SearchOutcome(attempted=False)
+        outcomes = {name: _execute_search(fn, name.capitalize()) for name, fn in searches}
 
-    # Check if all attempted backends failed
-    attempted_backends = [vector, bm25]
-    if symbol.attempted:
-        attempted_backends.append(symbol)
-
-    all_failed = all(b.failed for b in attempted_backends)
-
-    if all_failed:
+    # Check failures
+    if all(outcomes[name].failed for name in outcomes):
         raise SearchError("All search backends failed")
 
-    # Log warnings for partial failures
-    failure_messages = {
-        "Vector": (vector.failed, "BM25/symbol-only"),
-        "BM25": (bm25.failed, "vector/symbol-only"),
-        "Symbol": (symbol.attempted and symbol.failed, "vector/BM25-only"),
-    }
-    for name, (failed, fallback) in failure_messages.items():
-        if failed:
-            logger.warning(f"{name} search failed, using {fallback} results")
+    for name, outcome in outcomes.items():
+        if outcome.failed:
+            logger.warning(f"{name.capitalize()} search failed, using other backends")
 
-    logger.info(
-        f"Search results: vector={len(vector.results)}, "
-        f"bm25={len(bm25.results)}, symbol={len(symbol.results)}"
-    )
+    logger.info(f"Search results: " + ", ".join(f"{k}={len(v.results)}" for k, v in outcomes.items()))
 
-    # Prepare result lists and weights for RRF
-    result_lists = [vector.results, bm25.results]
-    weights = [vec_weight, bm_weight]
+    # Fuse results
+    result_lists = [outcomes["vector"].results, outcomes["bm25"].results]
+    weights = [vec_w, bm25_w]
+    if include_sym and outcomes.get("symbol") and outcomes["symbol"].results:
+        result_lists.append(outcomes["symbol"].results)
+        weights.append(sym_w)
 
-    # Add symbol results if available
-    if symbol.attempted and symbol.results:
-        result_lists.append(symbol.results)
-        weights.append(sym_weight)
-
-    fused_results = reciprocal_rank_fusion(result_lists, weights=weights)
-
-    candidates = fused_results[:rerank_count]
+    candidates = reciprocal_rank_fusion(result_lists, weights=weights)[:rerank_count]
 
     if settings.centrality_weight > 0:
         apply_centrality_boost(candidates, repo_name, settings.centrality_weight)
@@ -297,28 +214,30 @@ def hybrid_search(
     apply_category_boosting(candidates, sort=True)
 
     if use_reranker and settings.cohere_api_key and candidates:
-        rerank_input = candidates[:top_k * 2]
-        logger.debug(f"Reranking {len(rerank_input)} candidates with Cohere")
-        return rerank_results(query, rerank_input, top_n=top_k)
+        logger.debug(f"Reranking {min(len(candidates), top_k * 2)} candidates with Cohere")
+        return rerank_results(query, candidates[:top_k * 2], top_n=top_k)
 
     return candidates[:top_k]
 
 
 def _format_results(results: list[SearchResult]) -> list[dict]:
     """Format search results for diagnostics output."""
-    return [
-        {"filename": r.filename, "location": r.location, "score": r.score}
-        for r in results
-    ]
+    return [{"filename": r.filename, "location": r.location, "score": r.score} for r in results]
 
 
-def search_with_diagnostics(
-    repo_name: str,
-    query: str,
-    top_k: int = 10,
-) -> dict:
-    """Perform search with detailed diagnostics for debugging."""
+def _timed_search(fn, diagnostics: dict, key: str) -> None:
+    """Execute a search function with timing and error handling."""
     import time
+    start = time.time()
+    try:
+        diagnostics["results"][key] = _format_results(fn())
+    except Exception as e:
+        diagnostics["results"][key] = {"error": str(e)}
+    diagnostics["timings"][key] = round(time.time() - start, 3)
+
+
+def search_with_diagnostics(repo_name: str, query: str, top_k: int = 10) -> dict:
+    """Perform search with detailed diagnostics for debugging."""
     from .tokenizer import tokenize_for_search
     from .bm25_search import detect_backend, get_corpus_stats
 
@@ -337,42 +256,26 @@ def search_with_diagnostics(
     except Exception as e:
         diagnostics["corpus_stats"] = {"error": str(e)}
 
-    # Run vector search with timing
-    start = time.time()
+    query_embedding = None
     try:
         query_embedding = get_query_embedding(query)
-        vector_results = vector_search(repo_name, query, top_k=top_k, query_embedding=query_embedding)
-        diagnostics["results"]["vector"] = _format_results(vector_results)
-    except Exception as e:
-        diagnostics["results"]["vector"] = {"error": str(e)}
-    diagnostics["timings"]["vector"] = round(time.time() - start, 3)
+    except Exception:
+        pass
 
-    # Run BM25 search with timing
-    start = time.time()
-    try:
-        bm25_results = bm25_search(repo_name, query, top_k=top_k)
-        diagnostics["results"]["bm25"] = _format_results(bm25_results)
-    except Exception as e:
-        diagnostics["results"]["bm25"] = {"error": str(e)}
-    diagnostics["timings"]["bm25"] = round(time.time() - start, 3)
+    _timed_search(
+        lambda: vector_search(repo_name, query, top_k=top_k, query_embedding=query_embedding),
+        diagnostics, "vector"
+    )
+    _timed_search(lambda: bm25_search(repo_name, query, top_k=top_k), diagnostics, "bm25")
+    _timed_search(
+        lambda: hybrid_search(repo_name, query, top_k=top_k, use_reranker=False),
+        diagnostics, "hybrid_no_rerank"
+    )
 
-    # Run hybrid search with timing
-    start = time.time()
-    try:
-        hybrid_results = hybrid_search(repo_name, query, top_k=top_k, use_reranker=False)
-        diagnostics["results"]["hybrid_no_rerank"] = _format_results(hybrid_results)
-    except Exception as e:
-        diagnostics["results"]["hybrid_no_rerank"] = {"error": str(e)}
-    diagnostics["timings"]["hybrid_no_rerank"] = round(time.time() - start, 3)
-
-    # Run with reranker if available
     if settings.cohere_api_key:
-        start = time.time()
-        try:
-            reranked_results = hybrid_search(repo_name, query, top_k=top_k, use_reranker=True)
-            diagnostics["results"]["hybrid_reranked"] = _format_results(reranked_results)
-        except Exception as e:
-            diagnostics["results"]["hybrid_reranked"] = {"error": str(e)}
-        diagnostics["timings"]["hybrid_reranked"] = round(time.time() - start, 3)
+        _timed_search(
+            lambda: hybrid_search(repo_name, query, top_k=top_k, use_reranker=True),
+            diagnostics, "hybrid_reranked"
+        )
 
     return diagnostics

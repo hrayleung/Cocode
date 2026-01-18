@@ -1,12 +1,12 @@
 """Search service - handles all code search operations."""
 
+import bisect
 import logging
 import re
 import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-import bisect
 
 from config.settings import settings
 from src.exceptions import SearchError
@@ -15,19 +15,15 @@ from src.retrieval.graph_expansion import expand_results_with_related
 
 logger = logging.getLogger(__name__)
 
-# Adaptive filtering settings
 MIN_SCORE_RATIO = 0.4
 FULL_CODE_COUNT = 3
 MAX_CHUNKS_PER_FILE = 3
 
-# Keywords that indicate the start of a function/class signature
 SIGNATURE_KEYWORDS = (
     "def ", "async def ", "class ", "function ", "const ", "let ",
     "var ", "fn ", "func ", "pub fn ", "impl ", "struct ", "enum ",
     "interface ", "type ", "export ", "@",
 )
-
-# Common comment prefixes to skip when extracting signatures
 COMMENT_PREFIXES = ("#", "//", "/*", '"""', "'''")
 
 
@@ -41,15 +37,13 @@ def extract_signature(content: str, language: str = "python") -> str:
         if not stripped or stripped.startswith(COMMENT_PREFIXES):
             continue
         if any(stripped.startswith(kw) for kw in SIGNATURE_KEYWORDS):
-            sig = stripped.split("{")[0].rstrip(" {:")
-            signatures.append(sig)
+            signatures.append(stripped.split("{")[0].rstrip(" {:"))
             if len(signatures) >= 2:
                 break
 
     if signatures:
         return "; ".join(signatures)
 
-    # Fall back to first non-comment line
     for line in lines[:5]:
         stripped = line.strip()
         if stripped and not stripped.startswith(COMMENT_PREFIXES):
@@ -58,94 +52,67 @@ def extract_signature(content: str, language: str = "python") -> str:
     return lines[0][:80] if lines else ""
 
 
-def _format_line_range(start_line: int, end_line: int) -> str:
+def _format_line_range(start: int, end: int) -> str:
     """Format a line range as L{start}-{end} or L{start} for single lines."""
-    if end_line > start_line:
-        return f"L{start_line}-{end_line}"
-    return f"L{start_line}"
-
-
-def _parse_symbol_location(loc_str: str) -> str | None:
-    """Parse symbol location format 'line_start:line_end' into formatted string.
-
-    Returns None if the string is not in symbol location format.
-    """
-    loc = str(loc_str)
-    if ':' not in loc or '[' in loc:
-        return None
-    parts = loc.split(':')
-    if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-        return _format_line_range(int(parts[0]), int(parts[1]))
-    return None
+    return f"L{start}-{end}" if end > start else f"L{start}"
 
 
 def parse_location(loc_str: str) -> str:
-    """Convert location string to human-readable format.
+    """Convert location string to human-readable format."""
+    loc = str(loc_str)
 
-    Handles both chunk locations (e.g., "[100, 200)") and
-    symbol locations (e.g., "42:58").
-    """
-    # Handle symbol location format
-    symbol_result = _parse_symbol_location(loc_str)
-    if symbol_result:
-        return symbol_result
+    # Symbol format: "line_start:line_end"
+    if ':' in loc and '[' not in loc:
+        parts = loc.split(':')
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            return _format_line_range(int(parts[0]), int(parts[1]))
 
-    # Handle chunk location format: "[start, end)"
-    match = re.match(r'\[(\d+),\s*(\d+)\)', str(loc_str))
+    # Chunk format: "[start, end)"
+    match = re.match(r'\[(\d+),\s*(\d+)\)', loc)
     if match:
         start, end = int(match.group(1)), int(match.group(2))
-        start_line = start // 40 + 1
-        end_line = end // 40
-        if end_line > start_line:
-            return f"~L{start_line}-{end_line}"
-        return f"~L{start_line}"
+        start_line, end_line = start // 40 + 1, end // 40
+        prefix = "~L"
+        return f"{prefix}{start_line}-{end_line}" if end_line > start_line else f"{prefix}{start_line}"
 
-    return str(loc_str)
+    return loc
 
 
 def location_to_lines(
     filename: str,
     loc_str: str,
     repo_path: str | None,
-    file_bytes_cache: dict[str, bytes],
-    newline_index_cache: dict[str, list[int]],
+    file_cache: dict[str, bytes],
+    newline_cache: dict[str, list[int]],
 ) -> str:
-    """Convert a location string into 1-indexed line ranges when possible."""
-    # Handle symbol location format
-    symbol_result = _parse_symbol_location(loc_str)
-    if symbol_result:
-        return symbol_result
+    """Convert a location string into 1-indexed line ranges."""
+    loc = str(loc_str)
 
-    # Chunk range format: "[start, end)"
-    match = re.match(r'\[(\d+),\s*(\d+)\)', str(loc_str))
-    if not match:
-        return str(loc_str)
+    # Symbol format
+    if ':' in loc and '[' not in loc:
+        parts = loc.split(':')
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            return _format_line_range(int(parts[0]), int(parts[1]))
 
-    if not repo_path:
+    # Chunk format
+    match = re.match(r'\[(\d+),\s*(\d+)\)', loc)
+    if not match or not repo_path:
         return parse_location(loc_str)
 
     start, end = int(match.group(1)), int(match.group(2))
 
-    if filename in newline_index_cache:
-        newlines = newline_index_cache[filename]
-    else:
+    # Get or compute newline positions
+    if filename not in newline_cache:
         try:
-            if filename in file_bytes_cache:
-                data = file_bytes_cache[filename]
-            else:
-                data = (Path(repo_path) / filename).read_bytes()
-                file_bytes_cache[filename] = data
+            if filename not in file_cache:
+                file_cache[filename] = (Path(repo_path) / filename).read_bytes()
+            newline_cache[filename] = [i for i, b in enumerate(file_cache[filename]) if b == 10]
         except Exception:
             return parse_location(loc_str)
 
-        newlines = [i for i, b in enumerate(data) if b == 10]
-        newline_index_cache[filename] = newlines
-
-    # Offsets are treated as byte offsets. end is exclusive.
-    start_off = max(start, 0)
-    end_off = max(end - 1, start_off)
-    start_line = bisect.bisect_right(newlines, start_off - 1) + 1
-    end_line = bisect.bisect_right(newlines, end_off - 1) + 1
+    newlines = newline_cache[filename]
+    start_line = bisect.bisect_right(newlines, max(start, 0) - 1) + 1
+    end_line = bisect.bisect_right(newlines, max(end - 1, start) - 1) + 1
 
     return _format_line_range(start_line, end_line)
 
@@ -157,30 +124,21 @@ class CodeSnippet:
     content: str
     score: float
     locations: list[str] = field(default_factory=list)
-    is_reference_only: bool = False  # True if this is a compact reference
+    is_reference_only: bool = False
 
     def to_dict(self) -> dict:
-        result = {
-            "filename": self.filename,
-            "score": round(self.score, 4),
-        }
+        result = {"filename": self.filename, "score": round(self.score, 4)}
         if self.is_reference_only:
-            # Compact format for lower-relevance results
-            result["reference"] = self.content  # Contains signature/preview
+            result["reference"] = self.content
             result["lines"] = self.locations
         else:
-            # Full format for top results
             result["content"] = self.content
             result["locations"] = self.locations
         return result
 
 
 class SearchService:
-    """Service for searching indexed codebases.
-
-    Uses tiered presentation: full code for top results,
-    compact references for lower-relevance matches.
-    """
+    """Service for searching indexed codebases."""
 
     def search(
         self,
@@ -191,92 +149,66 @@ class SearchService:
         expand_related: bool = True,
         max_related: int = 3,
     ) -> list[CodeSnippet]:
-        """Search a repository using hybrid semantic + keyword search.
-
-        Returns tiered results:
-        - Top N results: full code content
-        - Remaining: filename:lines with signature preview
-        - Related files: files that import or are imported by results
-
-        Args:
-            repo_name: Name of the indexed repository
-            query: Natural language search query
-            top_k: Total number of files to return
-            full_code_count: How many top results get full code
-            expand_related: Whether to include related files via import graph
-            max_related: Maximum number of related files to include
-
-        Returns:
-            List of relevant code snippets
-
-        Raises:
-            SearchError: If search fails
-        """
+        """Search a repository using hybrid semantic + keyword search."""
         if not query or not query.strip():
             raise SearchError("Query cannot be empty")
 
         try:
-            # Fetch candidates
-            candidates = top_k * 3
-
             results = hybrid_search(
                 repo_name=repo_name,
                 query=query.strip(),
-                top_k=candidates,
+                top_k=top_k * 3,
                 use_reranker=bool(settings.cohere_api_key),
             )
-
             if not results:
                 return []
 
-            repo_path: str | None = None
-            try:
-                from src.indexer.repo_manager import RepoManager
-
-                repo = RepoManager().get_repo(repo_name)
-                repo_path = repo.path if repo else None
-            except Exception:
-                repo_path = None
-
-            # Apply adaptive score filtering
-            top_score = results[0].score
-            min_score = top_score * MIN_SCORE_RATIO
-            filtered = [r for r in results if r.score >= min_score]
-            # Guard: don't let filtering collapse results to far fewer files than requested.
-            total_files = len({r.filename for r in results})
-            filtered_files = len({r.filename for r in filtered})
-            if filtered_files < min(top_k, total_files):
-                filtered = results
-
-            # Aggregate by file with tiered presentation
+            repo_path = self._get_repo_path(repo_name)
+            filtered = self._filter_by_score(results, top_k)
             file_results = self._aggregate_tiered(filtered, top_k, full_code_count, repo_path)
 
-            # Expand with related files (imports/imported-by)
             if expand_related and file_results:
-                result_filenames = [r.filename for r in file_results]
-                try:
-                    related_files = expand_results_with_related(
-                        repo_name, result_filenames, max_expansion=max_related
-                    )
-                    if related_files:
-                        logger.debug(f"Found {len(related_files)} related files")
-                        # Add related files as reference snippets
-                        for related_file in related_files:
-                            file_results.append(CodeSnippet(
-                                filename=related_file,
-                                content=f"[Related via imports]",
-                                score=0.0,  # Mark as related, not matched
-                                locations=[],
-                                is_reference_only=True,
-                            ))
-                except Exception as e:
-                    logger.debug(f"Graph expansion failed: {e}")
+                self._add_related_files(repo_name, file_results, max_related)
 
             return file_results
 
         except Exception as e:
             logger.error(f"Search failed for {repo_name}: {e}")
             raise SearchError(f"Search failed: {e}") from e
+
+    def _get_repo_path(self, repo_name: str) -> str | None:
+        try:
+            from src.indexer.repo_manager import RepoManager
+            repo = RepoManager().get_repo(repo_name)
+            return repo.path if repo else None
+        except Exception:
+            return None
+
+    def _filter_by_score(self, results: list, top_k: int) -> list:
+        """Apply adaptive score filtering."""
+        top_score = results[0].score
+        filtered = [r for r in results if r.score >= top_score * MIN_SCORE_RATIO]
+
+        total_files = len({r.filename for r in results})
+        if len({r.filename for r in filtered}) < min(top_k, total_files):
+            return results
+        return filtered
+
+    def _add_related_files(self, repo_name: str, file_results: list[CodeSnippet], max_related: int) -> None:
+        """Add related files via import graph expansion."""
+        try:
+            related = expand_results_with_related(
+                repo_name, [r.filename for r in file_results], max_expansion=max_related
+            )
+            for filename in related or []:
+                file_results.append(CodeSnippet(
+                    filename=filename,
+                    content="[Related via imports]",
+                    score=0.0,
+                    is_reference_only=True,
+                ))
+        except Exception as e:
+            logger.debug(f"Graph expansion failed: {e}")
 
     def _aggregate_tiered(
         self,
@@ -285,67 +217,35 @@ class SearchService:
         full_code_count: int,
         repo_path: str | None,
     ) -> list[CodeSnippet]:
-        """Aggregate results with tiered presentation.
-
-        Top results get full code, rest get compact references.
-        Ensures minimum ratio of implementation files.
-        """
+        """Aggregate results with tiered presentation."""
         from src.retrieval.file_categorizer import categorize_file
-        
+
         file_chunks: dict[str, list] = {}
         file_scores: dict[str, float] = {}
         file_categories: dict[str, str] = {}
 
         for r in results:
-            filename = r.filename
-            if filename not in file_chunks:
-                file_chunks[filename] = []
-                file_scores[filename] = 0.0
-                file_categories[filename] = categorize_file(filename)
+            if r.filename not in file_chunks:
+                file_chunks[r.filename] = []
+                file_scores[r.filename] = 0.0
+                file_categories[r.filename] = categorize_file(r.filename)
+            file_chunks[r.filename].append(r)
+            file_scores[r.filename] = max(file_scores[r.filename], r.score)
 
-            file_chunks[filename].append(r)
-            file_scores[filename] = max(file_scores[filename], r.score)
-
-        all_files = sorted(
-            file_chunks.keys(),
-            key=lambda f: file_scores[f],
-            reverse=True
-        )
-        
         selected = self._mmr_diversify(
-            all_files, file_scores, file_categories, top_k, settings.diversity_lambda
+            sorted(file_chunks, key=lambda f: file_scores[f], reverse=True),
+            file_scores, file_categories, top_k, settings.diversity_lambda
         )
 
-        file_bytes_cache: dict[str, bytes] = {}
-        newline_index_cache: dict[str, list[int]] = {}
+        file_cache: dict[str, bytes] = {}
+        newline_cache: dict[str, list[int]] = {}
 
-        aggregated = []
-        for i, filename in enumerate(selected):
-            chunks = file_chunks[filename]
-            is_top_result = i < full_code_count
-
-            if is_top_result:
-                snippet = self._build_full_snippet(
-                    filename,
-                    chunks,
-                    file_scores[filename],
-                    repo_path,
-                    file_bytes_cache,
-                    newline_index_cache,
-                )
-            else:
-                snippet = self._build_reference_snippet(
-                    filename,
-                    chunks,
-                    file_scores[filename],
-                    repo_path,
-                    file_bytes_cache,
-                    newline_index_cache,
-                )
-
-            aggregated.append(snippet)
-
-        return aggregated
+        return [
+            self._build_full_snippet(f, file_chunks[f], file_scores[f], repo_path, file_cache, newline_cache)
+            if i < full_code_count else
+            self._build_reference_snippet(f, file_chunks[f], file_scores[f], repo_path, file_cache, newline_cache)
+            for i, f in enumerate(selected)
+        ]
 
     def _mmr_diversify(
         self,
@@ -355,30 +255,21 @@ class SearchService:
         k: int,
         lambda_param: float,
     ) -> list[str]:
-        """Maximal Marginal Relevance for diverse result selection.
-
-        Balances relevance with diversity by penalizing results similar
-        to already-selected ones (same category = similar).
-        """
+        """Maximal Marginal Relevance for diverse result selection."""
         selected: list[str] = []
         remaining = list(candidates)
         category_counts: dict[str, int] = defaultdict(int)
 
         while len(selected) < k and remaining:
-            best_file = None
-            best_mmr_score = float('-inf')
+            best_file, best_score = None, float('-inf')
 
             for candidate in remaining:
-                relevance = scores[candidate]
-                category = categories[candidate]
                 divisor = max(len(selected), 1)
-                diversity_penalty = category_counts[category] / divisor
+                penalty = category_counts[categories[candidate]] / divisor
+                mmr = lambda_param * scores[candidate] - (1 - lambda_param) * penalty
 
-                mmr_score = lambda_param * relevance - (1 - lambda_param) * diversity_penalty
-
-                if mmr_score > best_mmr_score:
-                    best_mmr_score = mmr_score
-                    best_file = candidate
+                if mmr > best_score:
+                    best_score, best_file = mmr, candidate
 
             if best_file:
                 selected.append(best_file)
@@ -388,80 +279,37 @@ class SearchService:
         return selected
 
     def _build_full_snippet(
-        self,
-        filename: str,
-        chunks: list,
-        score: float,
-        repo_path: str | None,
-        file_bytes_cache: dict[str, bytes],
-        newline_index_cache: dict[str, list[int]],
+        self, filename: str, chunks: list, score: float, repo_path: str | None,
+        file_cache: dict[str, bytes], newline_cache: dict[str, list[int]],
     ) -> CodeSnippet:
         """Build full code snippet for top results."""
-        chunks_by_score = sorted(chunks, key=lambda c: c.score, reverse=True)
-        top_chunks = chunks_by_score[:MAX_CHUNKS_PER_FILE]
-        chunks_sorted = sorted(top_chunks, key=lambda c: c.location)
+        top_chunks = sorted(chunks, key=lambda c: c.score, reverse=True)[:MAX_CHUNKS_PER_FILE]
+        sorted_chunks = sorted(top_chunks, key=lambda c: c.location)
 
-        content_parts = []
-        locations = []
-        seen_content = set()
-
-        for chunk in chunks_sorted:
-            content_hash = hash(chunk.content.strip())
-            if content_hash not in seen_content:
-                seen_content.add(content_hash)
+        content_parts, locations, seen = [], [], set()
+        for chunk in sorted_chunks:
+            h = hash(chunk.content.strip())
+            if h not in seen:
+                seen.add(h)
                 content_parts.append(chunk.content)
                 if chunk.location:
-                    locations.append(
-                        location_to_lines(
-                            filename,
-                            str(chunk.location),
-                            repo_path,
-                            file_bytes_cache,
-                            newline_index_cache,
-                        )
-                    )
+                    locations.append(location_to_lines(filename, str(chunk.location), repo_path, file_cache, newline_cache))
 
-        return CodeSnippet(
-            filename=filename,
-            content="\n\n".join(content_parts),
-            score=score,
-            locations=locations,
-            is_reference_only=False,
-        )
+        return CodeSnippet(filename=filename, content="\n\n".join(content_parts), score=score, locations=locations)
 
     def _build_reference_snippet(
-        self,
-        filename: str,
-        chunks: list,
-        score: float,
-        repo_path: str | None,
-        file_bytes_cache: dict[str, bytes],
-        newline_index_cache: dict[str, list[int]],
+        self, filename: str, chunks: list, score: float, repo_path: str | None,
+        file_cache: dict[str, bytes], newline_cache: dict[str, list[int]],
     ) -> CodeSnippet:
         """Build compact reference for lower-relevance results."""
-        # Get best chunk for signature extraction
-        best_chunk = max(chunks, key=lambda c: c.score)
-        signature = extract_signature(best_chunk.content)
-
-        # Collect and format locations
-        raw_locations = sorted(set(str(c.location) for c in chunks if c.location))
+        best = max(chunks, key=lambda c: c.score)
         locations = [
-            location_to_lines(
-                filename,
-                loc,
-                repo_path,
-                file_bytes_cache,
-                newline_index_cache,
-            )
-            for loc in raw_locations[:3]
+            location_to_lines(filename, loc, repo_path, file_cache, newline_cache)
+            for loc in sorted(set(str(c.location) for c in chunks if c.location))[:3]
         ]
-
         return CodeSnippet(
-            filename=filename,
-            content=signature,  # Just the signature/preview
-            score=score,
-            locations=locations,
-            is_reference_only=True,
+            filename=filename, content=extract_signature(best.content),
+            score=score, locations=locations, is_reference_only=True
         )
 
 
