@@ -171,7 +171,7 @@ def _search_keyword_fallback(cur, table_name: str, tokens: list[str], top_k: int
     cur.execute(psycopg_sql.SQL("""
         SELECT filename, location, content,
                ({score})::float / %s * (1.0 / (1.0 + ln(greatest(length(content), 1)))) AS score
-        FROM {}
+        FROM {table}
         WHERE {where}
         ORDER BY score DESC
         LIMIT %s
