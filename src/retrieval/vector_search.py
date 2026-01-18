@@ -3,6 +3,8 @@
 import logging
 import re
 
+from psycopg import sql
+
 from config.settings import settings
 from src.embeddings.openai import get_embedding
 from src.models import SearchResult
@@ -77,13 +79,13 @@ def vector_search(
         with conn.cursor() as cur:
             # Use cosine distance (<=> operator) for similarity search
             cur.execute(
-                f"""
+                sql.SQL("""
                 SELECT filename, location, content,
                        1 - (embedding <=> %s::vector) AS similarity
-                FROM {table_name}
+                FROM {}
                 ORDER BY embedding <=> %s::vector
                 LIMIT %s
-                """,
+                """).format(sql.Identifier(table_name)),
                 (query_embedding, query_embedding, top_k),
             )
             rows = cur.fetchall()

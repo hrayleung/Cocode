@@ -100,12 +100,57 @@ class IndexerService:
             return None
 
     def _validate_path(self, path: str) -> Path:
-        resolved = Path(path).resolve()
-        if not resolved.exists():
-            raise PathError(f"Path does not exist: {path}")
-        if not resolved.is_dir():
-            raise PathError(f"Path is not a directory: {path}")
-        return resolved
+        """Validate and sanitize a path for indexing.
+
+        Security considerations:
+        - Resolves to absolute path to prevent relative path attacks
+        - Checks for symlinks (warns but allows them)
+        - Validates that path exists and is a directory
+        - Prevents path traversal attacks through resolution
+
+        Args:
+            path: Path to validate
+
+        Returns:
+            Resolved, validated Path object
+
+        Raises:
+            PathError: If path is invalid or unsafe
+        """
+        try:
+            # Convert to Path object and resolve to absolute path
+            # This handles relative paths, '.', '..', symlinks
+            resolved = Path(path).resolve(strict=False)
+
+            # Check if path exists
+            if not resolved.exists():
+                raise PathError(f"Path does not exist")
+
+            # Check if it's a directory
+            if not resolved.is_dir():
+                raise PathError(f"Path is not a directory")
+
+            # Warn if path is a symlink (but allow it)
+            original_path = Path(path)
+            if original_path.is_symlink():
+                logger.warning(f"Path is a symlink: {path} -> {resolved}")
+
+            # Additional security check: ensure the resolved path is accessible
+            # Try to list the directory to verify read permissions
+            try:
+                next(resolved.iterdir(), None)
+            except PermissionError:
+                raise PathError(f"Insufficient permissions to read directory")
+            except StopIteration:
+                # Empty directory is fine
+                pass
+
+            logger.debug(f"Validated path: {path} -> {resolved}")
+            return resolved
+
+        except (OSError, RuntimeError) as e:
+            # Catch various filesystem errors
+            raise PathError(f"Invalid or unsafe path: {e}") from e
 
     def _get_stats(self, repo_name: str) -> tuple[int, int]:
         return self._repo_manager.get_file_count(repo_name), self._repo_manager.get_chunk_count(repo_name)
