@@ -140,17 +140,12 @@ def _run_searches_parallel(
     with ThreadPoolExecutor(max_workers=len(searches)) as executor:
         futures = {name: executor.submit(fn) for name, fn in searches}
         for name, future in futures.items():
-            outcomes[name] = _await_search_result(name, future)
+            try:
+                outcomes[name] = SearchOutcome(results=future.result(timeout=30))
+            except Exception as e:
+                logger.warning(f"{name} search failed: {e}")
+                outcomes[name] = SearchOutcome(failed=True)
     return outcomes
-
-
-def _await_search_result(name: str, future) -> SearchOutcome:
-    """Wait for a search future and return its outcome."""
-    try:
-        return SearchOutcome(results=future.result(timeout=30))
-    except Exception as e:
-        logger.warning(f"{name} search failed: {e}")
-        return SearchOutcome(failed=True)
 
 
 def hybrid_search(

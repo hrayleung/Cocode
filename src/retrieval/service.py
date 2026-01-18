@@ -261,37 +261,22 @@ class SearchService:
         category_counts: dict[str, int] = defaultdict(int)
 
         while len(selected) < k and remaining:
-            best_file = self._select_best_candidate(
-                remaining, selected, scores, categories, category_counts, lambda_param
-            )
+            best_file, best_score = None, float('-inf')
+
+            for candidate in remaining:
+                divisor = max(len(selected), 1)
+                penalty = category_counts[categories[candidate]] / divisor
+                mmr = lambda_param * scores[candidate] - (1 - lambda_param) * penalty
+
+                if mmr > best_score:
+                    best_score, best_file = mmr, candidate
+
             if best_file:
                 selected.append(best_file)
                 remaining.remove(best_file)
                 category_counts[categories[best_file]] += 1
 
         return selected
-
-    def _select_best_candidate(
-        self,
-        candidates: list[str],
-        selected: list[str],
-        scores: dict[str, float],
-        categories: dict[str, str],
-        category_counts: dict[str, int],
-        lambda_param: float,
-    ) -> str | None:
-        """Select the best candidate using MMR scoring."""
-        best_file, best_score = None, float('-inf')
-        divisor = max(len(selected), 1)
-
-        for candidate in candidates:
-            penalty = category_counts[categories[candidate]] / divisor
-            mmr = lambda_param * scores[candidate] - (1 - lambda_param) * penalty
-
-            if mmr > best_score:
-                best_score, best_file = mmr, candidate
-
-        return best_file
 
     def _build_full_snippet(
         self, filename: str, chunks: list, score: float, repo_path: str | None,

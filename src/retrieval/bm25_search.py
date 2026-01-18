@@ -41,11 +41,7 @@ def _check_extension(extension: str, installed: bool = True) -> bool:
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
-                query = psycopg_sql.SQL("SELECT 1 FROM {table} WHERE {col} = %s").format(
-                    table=psycopg_sql.Identifier(table),
-                    col=psycopg_sql.Identifier(col)
-                )
-                cur.execute(query, (extension,))
+                cur.execute(f"SELECT 1 FROM {table} WHERE {col} = %s", (extension,))
                 return cur.fetchone() is not None
     except Exception:
         return False
@@ -91,41 +87,35 @@ def _has_bm25_index(table_name: str) -> bool:
 
 def _search_pg_search(table_name: str, tokens: list[str], top_k: int) -> list[SearchResult]:
     """Search using ParadeDB pg_search extension."""
-    if not tokens:
-        return []
-    if not _has_bm25_index(table_name):
-        return _search_native_fts(table_name, tokens, top_k)
+    if not tokens or not _has_bm25_index(table_name):
+        return _search_native_fts(table_name, tokens, top_k) if tokens else []
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-            query = psycopg_sql.SQL("""
+            cur.execute(f"""
                 SELECT filename, location, content, paradedb.score(id) AS score
-                FROM {table}
+                FROM {table_name}
                 WHERE content @@@ %s
                 ORDER BY score DESC
                 LIMIT %s
-            """).format(table=psycopg_sql.Identifier(table_name))
-            cur.execute(query, (" ".join(tokens), top_k))
+            """, (" ".join(tokens), top_k))
             return _rows_to_results(cur.fetchall())
 
 
 def _search_pg_textsearch(table_name: str, tokens: list[str], top_k: int) -> list[SearchResult]:
     """Search using pg_textsearch extension."""
-    if not tokens:
-        return []
-    if not _has_bm25_index(table_name):
-        return _search_native_fts(table_name, tokens, top_k)
+    if not tokens or not _has_bm25_index(table_name):
+        return _search_native_fts(table_name, tokens, top_k) if tokens else []
 
     search_query = " ".join(tokens)
     with get_connection() as conn:
         with conn.cursor() as cur:
-            query = psycopg_sql.SQL("""
+            cur.execute(f"""
                 SELECT filename, location, content, -(content <@> %s) AS score
-                FROM {table}
+                FROM {table_name}
                 ORDER BY content <@> %s
                 LIMIT %s
-            """).format(table=psycopg_sql.Identifier(table_name))
-            cur.execute(query, (search_query, search_query, top_k))
+            """, (search_query, search_query, top_k))
             return _rows_to_results(cur.fetchall())
 
 
@@ -141,17 +131,16 @@ def _search_native_fts(table_name: str, tokens: list[str], top_k: int, config: B
                 "SELECT 1 FROM information_schema.columns WHERE table_name = %s AND column_name = 'content_tsv'",
                 (table_name,)
             )
-            tsv_sql = psycopg_sql.Identifier("content_tsv") if cur.fetchone() else psycopg_sql.SQL("to_tsvector('english', content)")
+            tsv_expr = "content_tsv" if cur.fetchone() else "to_tsvector('english', content)"
 
-            query = psycopg_sql.SQL("""
+            cur.execute(f"""
                 WITH query AS (SELECT websearch_to_tsquery('english', %s) AS q)
-                SELECT filename, location, content, ts_rank_cd({tsv}, query.q, 37) AS score
-                FROM {table}, query
-                WHERE {tsv} @@ query.q
+                SELECT filename, location, content, ts_rank_cd({tsv_expr}, query.q, 37) AS score
+                FROM {table_name}, query
+                WHERE {tsv_expr} @@ query.q
                 ORDER BY score DESC
                 LIMIT %s
-            """).format(tsv=tsv_sql, table=psycopg_sql.Identifier(table_name))
-            cur.execute(query, (" OR ".join(tokens), top_k))
+            """, (" OR ".join(tokens), top_k))
 
             rows = cur.fetchall()
             if not rows:
@@ -165,29 +154,18 @@ def _search_keyword_fallback(cur, table_name: str, tokens: list[str], top_k: int
     if not tokens:
         return []
 
-    # Build parameterized score and where clauses
-    score_cases = []
-    where_conditions = []
-    params = []
+    patterns = [f"%{t}%" for t in tokens]
+    score_expr = " + ".join(f"(CASE WHEN content ILIKE %s THEN 1 ELSE 0 END)" for _ in tokens)
+    where_clause = " OR ".join("content ILIKE %s" for _ in tokens)
 
-    for pattern in [f"%{t}%" for t in tokens]:
-        score_cases.append(psycopg_sql.SQL("(CASE WHEN content ILIKE %s THEN 1 ELSE 0 END)"))
-        where_conditions.append(psycopg_sql.SQL("content ILIKE %s"))
-        params.append(pattern)
-
-    score_expr = psycopg_sql.SQL(" + ").join(score_cases)
-    where_clause = psycopg_sql.SQL(" OR ").join(where_conditions)
-
-    query = psycopg_sql.SQL("""
+    cur.execute(f"""
         SELECT filename, location, content,
-               ({score})::float / %s * (1.0 / (1.0 + ln(greatest(length(content), 1)))) AS score
-        FROM {table}
-        WHERE {where}
+               ({score_expr})::float / %s * (1.0 / (1.0 + ln(greatest(length(content), 1)))) AS score
+        FROM {table_name}
+        WHERE {where_clause}
         ORDER BY score DESC
         LIMIT %s
-    """).format(score=score_expr, table=psycopg_sql.Identifier(table_name), where=where_clause)
-
-    cur.execute(query, params + [len(tokens)] + params + [top_k])
+    """, patterns + [len(tokens)] + patterns + [top_k])
 
     return cur.fetchall()
 
@@ -225,20 +203,12 @@ def _ensure_basic_fts_index(repo_name: str) -> bool:
                     (table_name,)
                 )
                 if not cur.fetchone():
-                    query = psycopg_sql.SQL("""
-                        ALTER TABLE {table}
+                    cur.execute(f"""
+                        ALTER TABLE {table_name}
                         ADD COLUMN IF NOT EXISTS content_tsv tsvector
                         GENERATED ALWAYS AS (to_tsvector('english', coalesce(content, ''))) STORED
-                    """).format(table=psycopg_sql.Identifier(table_name))
-                    cur.execute(query)
-
-                index_query = psycopg_sql.SQL("""
-                    CREATE INDEX IF NOT EXISTS {index_name} ON {table} USING GIN(content_tsv)
-                """).format(
-                    index_name=psycopg_sql.Identifier(f"idx_{table_name}_content_tsv"),
-                    table=psycopg_sql.Identifier(table_name)
-                )
-                cur.execute(index_query)
+                    """)
+                cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_content_tsv ON {table_name} USING GIN(content_tsv)")
                 conn.commit()
                 return True
     except Exception as e:
@@ -276,10 +246,9 @@ def get_corpus_stats(repo_name: str) -> dict:
     table_name = get_chunks_table_name(repo_name)
     with get_connection() as conn:
         with conn.cursor() as cur:
-            query = psycopg_sql.SQL("""
+            cur.execute(f"""
                 SELECT COUNT(*), AVG(length(content)), SUM(length(content))
-                FROM {table}
-            """).format(table=psycopg_sql.Identifier(table_name))
-            cur.execute(query)
+                FROM {table_name}
+            """)
             row = cur.fetchone()
     return {"doc_count": row[0] or 0, "avg_doc_length": float(row[1]) if row[1] else 0.0, "total_length": row[2] or 0}

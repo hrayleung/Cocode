@@ -58,6 +58,7 @@ class IndexerService:
     @staticmethod
     def path_to_repo_name(path: str) -> str:
         """Convert a path to a consistent repository name."""
+        import re
         name = Path(path).resolve().name.lower()
         name = re.sub(r'[-. ]+', '_', name)
         name = re.sub(r'[^a-z0-9_]', '', name).strip('_')
@@ -70,18 +71,24 @@ class IndexerService:
         base = self.path_to_repo_name(resolved_str)
         digest = hashlib.sha1(resolved_str.encode("utf-8")).hexdigest()
 
+        def get_repo_safe(name: str):
+            try:
+                return self._repo_manager.get_repo(name)
+            except Exception:
+                return None
+
         # Check existing registrations
         for name in [base] + [f"{base}_{digest[:n]}" for n in (8, 12, 16, 40)]:
-            existing = self._get_repo_safe(name)
+            existing = get_repo_safe(name)
             if existing and existing.path == resolved_str:
                 return name
 
         # Find available name
-        if self._get_repo_safe(base) is None:
+        if get_repo_safe(base) is None:
             return base
         for n in (8, 12, 16, 40):
             hashed = f"{base}_{digest[:n]}"
-            if self._get_repo_safe(hashed) is None:
+            if get_repo_safe(hashed) is None:
                 return hashed
         return f"{base}_{digest}"
 
@@ -134,11 +141,7 @@ class IndexerService:
                     yield full_path, str(relative)
 
     def _has_files_changed(self, repo_name: str, repo_path: str) -> bool:
-        """Check if any indexed files have changed since last indexing.
-
-        Uses a 1-second cache to avoid redundant filesystem scans in quick succession
-        while remaining responsive to actual file changes.
-        """
+        """Check if any indexed files have changed since last indexing."""
         repo = self._repo_manager.get_repo(repo_name)
         if not (repo and repo.last_indexed):
             return False
@@ -148,23 +151,21 @@ class IndexerService:
 
         # Check cache (1 second TTL)
         cached = self._change_check_cache.get(repo_name)
-        if cached and cached[0] == last_ts and (now - cached[1]) < 1.0:
+        if cached and cached[0] == last_ts and (now - cached[1]) < 5.0:
             return cached[2]
 
-        changed = self._check_files_modified(repo_path, last_ts)
-        self._change_check_cache[repo_name] = (last_ts, now, changed)
-        return changed
-
-    def _check_files_modified(self, repo_path: str, last_ts: float) -> bool:
-        """Check if any relevant files have been modified since last_ts."""
+        changed = False
         for full_path, _ in self._iter_relevant_files(repo_path):
             try:
                 if full_path.stat().st_mtime > last_ts:
-                    return True
+                    changed = True
+                    break
             except OSError:
-                # File access error - assume changed to trigger re-index
-                return True
-        return False
+                changed = True
+                break
+
+        self._change_check_cache[repo_name] = (last_ts, now, changed)
+        return changed
 
     @staticmethod
     def _datetime_to_timestamp(value: datetime) -> float:
@@ -306,8 +307,8 @@ class IndexerService:
                     try:
                         content = file_path.read_text(encoding="utf-8")
                         index_file_symbols(repo_name, rel_path, content, embedding_provider=provider)
-                    except Exception as e:
-                        logger.warning(f"Failed to index symbols for {rel_path}: {e}")
+                    except Exception:
+                        pass
         except Exception as e:
             logger.warning(f"Symbol indexing failed for {repo_name}: {e}")
 
