@@ -167,7 +167,7 @@ Claude Desktop reads its configuration from `claude_desktop_config.json`:
 <details>
 <summary><b>Claude Code CLI</b></summary>
 
-### Option 1: Add via CLI (Recommended)
+#### Option 1: Add via CLI (Recommended)
 
 ```bash
 # Add to your user config (available across all projects)
@@ -289,7 +289,7 @@ VS Code supports MCP servers through workspace or user settings.
 
 Codex stores MCP server configs in `~/.codex/config.toml`.
 
-### Option 1: Add via CLI (Codex)
+#### Option 1: Add via CLI (Codex)
 
 ```bash
 # Add the server (stdio transport)

@@ -159,7 +159,7 @@ class _EmbeddingCache:
         """Get the embedding, computing it on first access."""
         if self._error:
             raise self._error
-        if self._embedding:
+        if self._embedding is not None:
             return self._embedding
 
         with self._lock:

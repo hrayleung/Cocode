@@ -8,6 +8,7 @@ Falls back gracefully when Tree-sitter is unavailable.
 """
 
 import logging
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -35,38 +36,44 @@ class LanguageParsers:
 
     _instance = None
     _initialized = False
+    _lock = threading.Lock()
 
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
         return cls._instance
 
     def __init__(self):
-        if self._initialized or not TREE_SITTER_AVAILABLE:
+        if LanguageParsers._initialized or not TREE_SITTER_AVAILABLE:
             return
 
-        self.languages = {}
-        self.parsers = {}
-        try:
-            self.languages = {
-                "python": Language(ts_python.language()),
-                "go": Language(ts_go.language()),
-                "rust": Language(ts_rust.language()),
-                "c": Language(ts_c.language()),
-                "cpp": Language(ts_cpp.language()),
-                "javascript": Language(ts_javascript.language()),
-                "typescript": Language(ts_typescript.language_typescript()),
-                "tsx": Language(ts_typescript.language_tsx()),
-            }
-            self.parsers = {
-                name: Parser(lang)
-                for name, lang in self.languages.items()
-            }
-            self._initialized = True
-            logger.info(f"Initialized Tree-sitter parsers for {len(self.parsers)} languages")
-        except Exception as e:
-            logger.error(f"Failed to initialize Tree-sitter parsers: {e}")
-            self._initialized = False
+        with LanguageParsers._lock:
+            if LanguageParsers._initialized:
+                return
+            self.languages = {}
+            self.parsers = {}
+            try:
+                self.languages = {
+                    "python": Language(ts_python.language()),
+                    "go": Language(ts_go.language()),
+                    "rust": Language(ts_rust.language()),
+                    "c": Language(ts_c.language()),
+                    "cpp": Language(ts_cpp.language()),
+                    "javascript": Language(ts_javascript.language()),
+                    "typescript": Language(ts_typescript.language_typescript()),
+                    "tsx": Language(ts_typescript.language_tsx()),
+                }
+                self.parsers = {
+                    name: Parser(lang)
+                    for name, lang in self.languages.items()
+                }
+                LanguageParsers._initialized = True
+                logger.info(f"Initialized Tree-sitter parsers for {len(self.parsers)} languages")
+            except Exception as e:
+                logger.error(f"Failed to initialize Tree-sitter parsers: {e}")
+                LanguageParsers._initialized = False
 
 
 def get_parser(language: str) -> Optional[Parser]:
