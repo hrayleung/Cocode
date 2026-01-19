@@ -167,7 +167,7 @@ Claude Desktop reads its configuration from `claude_desktop_config.json`:
 <details>
 <summary><b>Claude Code CLI</b></summary>
 
-#### Option 1: Add via CLI (Recommended)
+### Option 1: Add via CLI (Recommended)
 
 ```bash
 # Add to your user config (available across all projects)
