@@ -112,7 +112,7 @@ def reciprocal_rank_fusion(
     scores: dict[str, float] = defaultdict(float)
     results_map: dict[str, SearchResult] = {}
 
-    for weight, results in zip(weights, result_lists):
+    for weight, results in zip(weights, result_lists, strict=True):
         for rank, result in enumerate(results):
             key = f"{result.filename}:{result.location}:{hash(result.content.strip())}"
             scores[key] += weight / (k + rank + 1)

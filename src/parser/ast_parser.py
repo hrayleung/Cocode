@@ -45,6 +45,8 @@ class LanguageParsers:
         if self._initialized or not TREE_SITTER_AVAILABLE:
             return
 
+        self.languages = {}
+        self.parsers = {}
         try:
             self.languages = {
                 "python": Language(ts_python.language()),

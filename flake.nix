@@ -26,7 +26,7 @@
             if [ ! -d "$PGDATA" ]; then
               initdb -D "$PGDATA"
               echo "unix_socket_directories = '$PGDATA'" >> "$PGDATA/postgresql.conf"
-              echo "listen_addresses = " >> "$PGDATA/postgresql.conf"
+              echo "listen_addresses = ''" >> "$PGDATA/postgresql.conf"
             fi
 
             [ ! -d "venv" ] && python -m venv venv
