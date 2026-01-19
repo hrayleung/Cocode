@@ -1,9 +1,34 @@
-"""Mistral Codestral Embed embeddings."""
+"""Mistral Codestral Embed embeddings.
+
+NOTE: Mistral embeddings have a fixed output dimension from the API.
+Cocode stores embeddings in pgvector with a configured dimension
+(`settings.embedding_dimensions`).
+
+To keep retrieval compatible with the stored index, we truncate embeddings
+to `settings.embedding_dimensions` when the API returns a longer vector.
+"""
 
 import httpx
 from config.settings import settings
 
 MISTRAL_API_URL = "https://api.mistral.ai/v1/embeddings"
+
+
+def _fit_dimensions(vec: list[float]) -> list[float]:
+    """Fit an embedding to the configured pgvector dimension."""
+
+    target = settings.embedding_dimensions
+    if target <= 0:
+        return vec
+
+    if len(vec) == target:
+        return vec
+
+    if len(vec) > target:
+        return vec[:target]
+
+    # If the model returns fewer dims than required, we must fail loudly.
+    raise ValueError(f"Embedding dimension mismatch: got {len(vec)}, expected {target}")
 
 
 def get_embedding(text: str) -> list[float]:
@@ -21,7 +46,8 @@ def get_embedding(text: str) -> list[float]:
             },
         )
         response.raise_for_status()
-        return response.json()["data"][0]["embedding"]
+        vec = response.json()["data"][0]["embedding"]
+        return _fit_dimensions(vec)
 
 
 def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
@@ -42,7 +68,7 @@ def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
         )
         response.raise_for_status()
         sorted_data = sorted(response.json()["data"], key=lambda x: x["index"])
-        return [d["embedding"] for d in sorted_data]
+        return [_fit_dimensions(d["embedding"]) for d in sorted_data]
 
 
 def is_available() -> bool:

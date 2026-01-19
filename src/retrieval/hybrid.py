@@ -74,6 +74,15 @@ def get_query_embedding(query: str) -> list[float]:
     return provider.get_embedding(query)
 
 
+def _normalize_rrf_weights(weights: list[float] | None, n: int) -> list[float]:
+    if weights is None:
+        return [1.0] * n
+    total = sum(weights)
+    if total > 0:
+        return [w / total for w in weights]
+    return [1.0 / n] * n
+
+
 def reciprocal_rank_fusion(
     result_lists: list[list[SearchResult]],
     k: int = 40,
@@ -81,32 +90,14 @@ def reciprocal_rank_fusion(
 ) -> list[SearchResult]:
     """Combine multiple result lists using Reciprocal Rank Fusion (RRF).
 
-    RRF combines rankings from multiple sources by summing the reciprocal
-    of each result's rank: score = sum(weight / (k + rank + 1))
-
-    This approach is robust to score calibration differences between
-    different ranking systems.
-
-    Args:
-        result_lists: List of result lists from different search methods
-        k: Smoothing parameter (default 40, higher = more uniform weights)
-        weights: Optional weights for each result list (normalized internally)
-
-    Returns:
-        Combined and sorted list of SearchResults
+    This is result-level RRF: it fuses identical *results* (filename+location+content).
+    Use `reciprocal_rank_fusion_by_key` when you want to fuse by a higher-level key
+    such as filename (file-level evidence aggregation).
     """
     if not result_lists:
         return []
 
-    # Normalize weights
-    if weights is None:
-        weights = [1.0] * len(result_lists)
-    else:
-        total = sum(weights)
-        if total > 0:
-            weights = [w / total for w in weights]
-        else:
-            weights = [1.0 / len(result_lists)] * len(result_lists)
+    weights = _normalize_rrf_weights(weights, len(result_lists))
 
     # Accumulate RRF scores
     scores: dict[str, float] = defaultdict(float)
@@ -127,6 +118,55 @@ def reciprocal_rank_fusion(
             filename=results_map[key].filename,
             location=results_map[key].location,
             content=results_map[key].content,
+            score=scores[key],
+        )
+        for key in sorted(scores, key=scores.get, reverse=True)
+    ]
+
+
+def reciprocal_rank_fusion_by_key(
+    result_lists: list[list[SearchResult]],
+    *,
+    key_fn: Callable[[SearchResult], str],
+    k: int = 40,
+    weights: list[float] | None = None,
+) -> list[SearchResult]:
+    """RRF that fuses by an arbitrary key (e.g., filename for file-level ranking).
+
+    This is useful when different backends surface different *spans* from the same file.
+    Fusing by filename rewards cross-signal agreement, which tends to improve "key file"
+    selection compared to max-chunk scoring.
+    """
+    if not result_lists:
+        return []
+
+    weights = _normalize_rrf_weights(weights, len(result_lists))
+
+    scores: dict[str, float] = defaultdict(float)
+    best_rep: dict[str, SearchResult] = {}
+    best_rank: dict[str, int] = {}
+    best_weight: dict[str, float] = {}
+
+    for weight, results in zip(weights, result_lists, strict=True):
+        for rank, result in enumerate(results):
+            key = key_fn(result)
+            scores[key] += weight / (k + rank + 1)
+
+            # Choose representative snippet by best rank; break ties by higher list weight.
+            if (
+                key not in best_rep
+                or rank < best_rank[key]
+                or (rank == best_rank[key] and weight > best_weight[key])
+            ):
+                best_rep[key] = result
+                best_rank[key] = rank
+                best_weight[key] = weight
+
+    return [
+        SearchResult(
+            filename=best_rep[key].filename,
+            location=best_rep[key].location,
+            content=best_rep[key].content,
             score=scores[key],
         )
         for key in sorted(scores, key=scores.get, reverse=True)
@@ -294,16 +334,21 @@ def hybrid_search(
 
     logger.info("Search results: " + ", ".join(f"{k}={len(v.results)}" for k, v in outcomes.items()))
 
-    # Fuse results using RRF
+    # Fuse results using RRF (file-level fusion so different spans from the same
+    # file reinforce each other across backends).
     result_lists = [outcomes["vector"].results, outcomes["bm25"].results]
     weights = [vec_w, bm25_w]
     if include_sym and outcomes.get("symbol") and outcomes["symbol"].results:
         result_lists.append(outcomes["symbol"].results)
         weights.append(sym_w)
 
-    candidates = reciprocal_rank_fusion(result_lists, weights=weights)[:rerank_count]
+    candidates = reciprocal_rank_fusion_by_key(
+        result_lists,
+        key_fn=lambda r: r.filename,
+        weights=weights,
+    )[:rerank_count]
 
-    # Apply boosting (must happen BEFORE reranking)
+    # Apply boosting (used for both candidate selection and final ordering)
     if settings.centrality_weight > 0:
         apply_centrality_boost(candidates, repo_name, settings.centrality_weight)
 
@@ -312,7 +357,15 @@ def hybrid_search(
     # Optional reranking with Cohere
     if use_reranker and settings.cohere_api_key and candidates:
         logger.debug(f"Reranking {min(len(candidates), top_k * 2)} candidates with Cohere")
-        return rerank_results(query, candidates[:top_k * 2], top_n=top_k)
+        reranked = rerank_results(query, candidates[:top_k * 2], top_n=top_k)
+
+        # Reranking replaces scores, so re-apply boosts to keep implementation
+        # preference and structural importance.
+        if settings.centrality_weight > 0:
+            apply_centrality_boost(reranked, repo_name, settings.centrality_weight)
+        apply_category_boosting(reranked, sort=True)
+
+        return reranked[:top_k]
 
     return candidates[:top_k]
 
@@ -369,7 +422,7 @@ def search_with_diagnostics(repo_name: str, query: str, top_k: int = 10) -> dict
         diagnostics, "hybrid_no_rerank"
     )
 
-    if settings.cohere_api_key:
+    if settings.cohere_api_key and settings.enable_reranker:
         _timed_search(
             lambda: hybrid_search(repo_name, query, top_k=top_k, use_reranker=True),
             diagnostics, "hybrid_reranked"

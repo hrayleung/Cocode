@@ -28,8 +28,9 @@ pytest -k "test_python"                       # Run tests matching pattern
 
 ### Entry Point
 
-`src/server.py` - FastMCP server exposing two tools:
-- `codebase_retrieval(query, path, top_k)` - Main search tool
+`src/server.py` - FastMCP server exposing three tools:
+- `codebase_retrieval(query, path, top_k)` - Main search tool (concise snippets)
+- `codebase_retrieval_full(query, path, top_k, max_symbols, max_symbols_per_file, max_code_chars, include_dependencies)` - Key files + dependencies + full symbol implementations
 - `clear_index(path)` - Delete index for re-indexing
 
 ### Core Services (Singletons)
