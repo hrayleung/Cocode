@@ -699,30 +699,6 @@ All these extensions are chunked and embedded for semantic + keyword search:
 
 Files not matching these extensions are ignored during indexing.
 
-## Performance Characteristics
-
-### Indexing Speed
-- **Initial Index**: ~1000-5000 files/minute (depends on file size, embedding provider latency)
-- **Incremental Updates**: Only changed files re-indexed (typically <1s for small changes)
-- **Parallel Processing**: CocoIndex uses async/await for concurrent embedding requests
-
-### Search Speed
-- **Vector Search**: ~50-200ms for large codebases (pgvector HNSW index)
-- **Hybrid Search**: ~100-400ms including RRF, ranking, and graph expansion
-- **With Reranking**: +200-500ms (Cohere API call)
-- **Graph Cache Hit**: 30-50% faster for import graph queries
-
-### Storage Requirements
-- **Embeddings**: ~4KB per chunk (1024 dimensions × 4 bytes)
-- **Symbols**: ~1-2KB per function/class
-- **Graph Cache**: ~500 bytes per file (JSONB compressed)
-- **Example**: 10,000 file codebase ≈ 200-500MB database size
-
-### Scalability
-- **Tested**: Up to 100,000+ files per repository
-- **PostgreSQL**: Connection pooling prevents resource exhaustion
-- **HNSW Index**: Logarithmic search time (O(log n))
-
 ## Development
 
 ### Running Tests
