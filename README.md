@@ -105,7 +105,67 @@ USE_LATE_CHUNKING=true
 COHERE_API_KEY=...
 ```
 
-## Usage with Claude Code
+## MCP Configuration
+
+Cocode works with multiple MCP clients. Choose the setup that matches your workflow.
+
+<details>
+<summary><b>Claude Desktop</b></summary>
+
+Claude Desktop reads its configuration from `claude_desktop_config.json`:
+
+**Configuration File Locations**:
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+- **Linux**: `~/.config/Claude/claude_desktop_config.json`
+
+**Configuration Example**:
+
+```json
+{
+  "mcpServers": {
+    "cocode": {
+      "command": "cocode",
+      "args": [],
+      "env": {
+        "COCOINDEX_DATABASE_URL": "postgresql://localhost:5432/cocode",
+        "JINA_API_KEY": "jina_...",
+        "EMBEDDING_PROVIDER": "jina",
+        "USE_LATE_CHUNKING": "true",
+        "COHERE_API_KEY": "your_cohere_key_optional"
+      }
+    }
+  }
+}
+```
+
+**Important Notes**:
+- Use **absolute paths** in `args` if needed
+- Avoid **trailing commas** in JSON (causes silent failures)
+- **Restart Claude Desktop completely** after config changes (not just close window)
+- Claude Desktop does **not** support `${VAR_NAME}` environment variable substitution (use literal values instead). Other clients like VS Code and `.mcp.json` configs support `${VAR_NAME}` or `${env:VAR}` syntax
+
+**Alternative: Using uvx for isolation**:
+
+```json
+{
+  "mcpServers": {
+    "cocode": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/hrayleung/Cocode.git", "cocode"],
+      "env": {
+        "COCOINDEX_DATABASE_URL": "postgresql://localhost:5432/cocode",
+        "JINA_API_KEY": "jina_..."
+      }
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Claude Code CLI</b></summary>
 
 ### Option 1: Add via CLI (Recommended)
 
@@ -116,14 +176,16 @@ claude mcp add -s user cocode -- cocode
 # Or add to current project only
 claude mcp add -s project cocode -- cocode
 
-# Optional: bake required env vars into the MCP entry
+# With environment variables baked in
 claude mcp add -s user \
   -e COCOINDEX_DATABASE_URL=postgresql://localhost:5432/cocode \
-  -e OPENAI_API_KEY="${OPENAI_API_KEY}" \
+  -e JINA_API_KEY="${JINA_API_KEY}" \
+  -e EMBEDDING_PROVIDER=jina \
+  -e USE_LATE_CHUNKING=true \
   cocode -- cocode
 ```
 
-### Option 2: Project Configuration
+#### Option 2: Project Configuration
 
 Create `.mcp.json` in your project root:
 
@@ -135,7 +197,6 @@ Create `.mcp.json` in your project root:
       "args": [],
       "env": {
         "COCOINDEX_DATABASE_URL": "postgresql://localhost:5432/cocode",
-        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
         "JINA_API_KEY": "${JINA_API_KEY}",
         "EMBEDDING_PROVIDER": "jina",
         "USE_LATE_CHUNKING": "true"
@@ -145,7 +206,7 @@ Create `.mcp.json` in your project root:
 }
 ```
 
-### Option 3: Run Standalone
+#### Option 3: Run Standalone
 
 ```bash
 cocode
@@ -153,16 +214,80 @@ cocode
 python -m src.server
 ```
 
-### Verify Installation
+#### Verify Installation
 
 In Claude Code:
-```
+```text
 /mcp
 ```
 
-## Usage with Codex CLI
+</details>
 
-Codex stores MCP server configs in `~/.codex/config.toml` (you can manage them via `codex mcp ...`).
+<details>
+<summary><b>VS Code (GitHub Copilot)</b></summary>
+
+VS Code supports MCP servers through workspace or user settings.
+
+**Workspace Configuration** (`.vscode/settings.json`):
+
+```json
+{
+  "github.copilot.chat.mcp.servers": {
+    "cocode": {
+      "command": "cocode",
+      "args": [],
+      "env": {
+        "COCOINDEX_DATABASE_URL": "postgresql://localhost:5432/cocode",
+        "JINA_API_KEY": "${env:JINA_API_KEY}",
+        "EMBEDDING_PROVIDER": "jina",
+        "USE_LATE_CHUNKING": "true"
+      }
+    }
+  }
+}
+```
+
+**User Configuration** (global settings):
+1. Open Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`)
+2. Search "Preferences: Open User Settings (JSON)"
+3. Add the same `github.copilot.chat.mcp.servers` object
+
+**Using Input Variables for Secrets**:
+
+```json
+{
+  "github.copilot.chat.mcp.servers": {
+    "cocode": {
+      "command": "cocode",
+      "args": [],
+      "env": {
+        "COCOINDEX_DATABASE_URL": "${input:databaseUrl}",
+        "JINA_API_KEY": "${input:jinaApiKey}"
+      }
+    }
+  },
+  "inputs": [
+    {
+      "id": "databaseUrl",
+      "type": "promptString",
+      "description": "PostgreSQL database URL"
+    },
+    {
+      "id": "jinaApiKey",
+      "type": "promptString",
+      "password": true,
+      "description": "Jina API Key"
+    }
+  ]
+}
+```
+
+</details>
+
+<details>
+<summary><b>Codex CLI</b></summary>
+
+Codex stores MCP server configs in `~/.codex/config.toml`.
 
 ### Option 1: Add via CLI (Recommended)
 
@@ -170,7 +295,9 @@ Codex stores MCP server configs in `~/.codex/config.toml` (you can manage them v
 # Add the server (stdio transport)
 codex mcp add cocode \
   --env COCOINDEX_DATABASE_URL=postgresql://localhost:5432/cocode \
-  --env OPENAI_API_KEY="${OPENAI_API_KEY}" \
+  --env JINA_API_KEY="${JINA_API_KEY}" \
+  --env EMBEDDING_PROVIDER=jina \
+  --env USE_LATE_CHUNKING=true \
   -- cocode
 
 # Verify
@@ -178,7 +305,7 @@ codex mcp list
 codex mcp get cocode
 ```
 
-### Option 2: Edit `~/.codex/config.toml`
+#### Option 2: Edit `~/.codex/config.toml`
 
 ```toml
 [mcp_servers.cocode]
@@ -187,8 +314,137 @@ args = []
 
 [mcp_servers.cocode.env]
 COCOINDEX_DATABASE_URL = "postgresql://localhost:5432/cocode"
-OPENAI_API_KEY = "sk-..."
+JINA_API_KEY = "jina_..."
+EMBEDDING_PROVIDER = "jina"
+USE_LATE_CHUNKING = "true"
 ```
+
+</details>
+
+<details>
+<summary><b>Warp Terminal</b></summary>
+
+Warp supports MCP servers through its settings UI.
+
+**Setup Steps**:
+1. Open Warp Settings via:
+   - `Settings > MCP Servers`, or
+   - `Warp Drive > Personal > MCP Servers`, or
+   - Command Palette: search "Open MCP Servers", or
+   - `Settings > AI > Manage MCP servers`
+2. Click `+ Add` button
+3. Choose configuration type:
+   - **CLI Server (Command)**: For local executables
+   - **Streamable HTTP/SSE Server (URL)**: For remote servers
+
+**CLI Server Configuration**:
+
+```json
+{
+  "command": "cocode",
+  "args": [],
+  "env": {
+    "COCOINDEX_DATABASE_URL": "postgresql://localhost:5432/cocode",
+    "JINA_API_KEY": "jina_...",
+    "EMBEDDING_PROVIDER": "jina",
+    "USE_LATE_CHUNKING": "true"
+  },
+  "working_directory": "/path/to/your/project"
+}
+```
+
+**Multiple Servers**: Paste JSON under the `mcpServers` key:
+
+```json
+{
+  "mcpServers": {
+    "cocode": {
+      "command": "cocode",
+      "args": [],
+      "env": {
+        "COCOINDEX_DATABASE_URL": "postgresql://localhost:5432/cocode",
+        "JINA_API_KEY": "jina_..."
+      }
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Troubleshooting MCP Setup</b></summary>
+
+#### Server Not Appearing
+
+1. **Check Configuration Syntax**:
+   - Validate JSON (no trailing commas)
+   - Use absolute paths in `args` if needed
+   - Ensure environment variables are quoted strings
+
+2. **Restart the Client**:
+   - Claude Desktop: Fully quit (not just close window)
+   - VS Code: Reload window or restart
+   - Warp: Restart terminal
+
+3. **Verify Server Installation**:
+```bash
+# Check if cocode is in PATH
+which cocode
+
+# Test server directly
+cocode
+```
+
+#### Connection Failures
+
+1. **Check PostgreSQL**:
+```bash
+# Test database connection
+psql postgresql://localhost:5432/cocode
+
+# Verify pgvector extension
+psql -d cocode -c "SELECT * FROM pg_extension WHERE extname = 'vector';"
+```
+
+2. **Verify API Keys**:
+   - Ensure keys are valid and not expired
+   - Check that `EMBEDDING_PROVIDER` matches the key you provided
+   - For Jina: `USE_LATE_CHUNKING=true` must be set
+
+3. **Check Logs**:
+   - **Claude Desktop**: Check MCP logs in the application
+   - **VS Code**: View Output panel → select "MCP" channel
+   - **Warp**: View server logs in MCP settings
+
+#### Common Errors
+
+**"Could not connect to server"**:
+- Verify server command is correct and in PATH
+- Check that all required environment variables are set
+- Ensure PostgreSQL is running
+
+**"Database connection failed"**:
+- Confirm PostgreSQL is running: `pg_isready`
+- Verify database URL format: `postgresql://user:pass@host:port/dbname`
+- Ensure database exists: `createdb cocode`
+
+**"Missing API key"**:
+- Set at least one embedding provider key
+- If using Jina: set both `JINA_API_KEY` and `USE_LATE_CHUNKING=true`
+- If using Mistral: set both `MISTRAL_API_KEY` and `OPENAI_API_KEY` (fallback)
+
+**Silent Failures**:
+- Check for trailing commas in JSON configuration
+- Validate JSON with a linter
+- Review application logs for specific error messages
+
+**Performance Issues**:
+- First indexing can take several minutes for large codebases
+- Check PostgreSQL memory settings if indexing is very slow
+- Consider enabling graph cache: automatically enabled by default
+
+</details>
 
 ## MCP Tools
 
