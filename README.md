@@ -81,8 +81,9 @@ pip install -e ".[dev]"
 ```
 
 The Nix flake automatically:
-- Sets up PostgreSQL 16 with pgvector in `.postgres/`
+- Sets up PostgreSQL 16 (via Unix socket) in `.postgres/`
 - Creates a Python virtual environment in `venv/`
+- Activates the venv automatically
 - Copies `.env.example` to `.env` if it doesn't exist
 
 ### Required Environment Variables
