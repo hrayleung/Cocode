@@ -143,7 +143,7 @@ Claude Desktop reads its configuration from `claude_desktop_config.json`:
 - Use **absolute paths** in `args` if needed
 - Avoid **trailing commas** in JSON (causes silent failures)
 - **Restart Claude Desktop completely** after config changes (not just close window)
-- Environment variables can reference shell variables with `${VAR_NAME}` syntax in some clients
+- Claude Desktop does **not** support `${VAR_NAME}` environment variable substitution (use literal values instead). Other clients like VS Code and `.mcp.json` configs support `${VAR_NAME}` or `${env:VAR}` syntax
 
 **Alternative: Using uvx for isolation**:
 
@@ -217,7 +217,7 @@ python -m src.server
 #### Verify Installation
 
 In Claude Code:
-```
+```text
 /mcp
 ```
 
