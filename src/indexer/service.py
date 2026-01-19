@@ -159,11 +159,11 @@ class IndexerService:
 
             # Check if path exists
             if not resolved.exists():
-                raise PathError(f"Path does not exist")
+                raise PathError(f"Path does not exist: {resolved}")
 
             # Check if it's a directory
             if not resolved.is_dir():
-                raise PathError(f"Path is not a directory")
+                raise PathError(f"Path is not a directory: {resolved}")
 
             # Warn if path is a symlink (but allow it)
             original_path = Path(path)
@@ -174,8 +174,8 @@ class IndexerService:
             # Try to list the directory to verify read permissions
             try:
                 next(resolved.iterdir(), None)
-            except PermissionError:
-                raise PathError(f"Insufficient permissions to read directory")
+            except PermissionError as e:
+                raise PathError(f"Insufficient permissions to read directory: {resolved}") from e
             except StopIteration:
                 # Empty directory is fine
                 pass
