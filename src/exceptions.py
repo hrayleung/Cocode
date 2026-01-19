@@ -1,21 +1,25 @@
-"""Custom exceptions for cocode."""
+"""Custom exceptions for cocode.
+
+This module defines a hierarchy of exceptions for the cocode MCP server.
+All exceptions inherit from CocodeError to allow for unified error handling.
+"""
 
 
 class CocodeError(Exception):
-    """Base exception."""
+    """Base exception for all cocode errors."""
 
 
 class IndexingError(CocodeError):
-    """Indexing error."""
+    """Raised when indexing a repository fails."""
 
 
 class SearchError(CocodeError):
-    """Search error."""
+    """Raised when a search operation fails."""
 
 
 class ConfigurationError(CocodeError):
-    """Configuration error."""
+    """Raised when configuration is invalid or missing."""
 
 
 class PathError(CocodeError):
-    """File path error."""
+    """Raised when a file path is invalid or inaccessible."""

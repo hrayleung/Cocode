@@ -1,17 +1,32 @@
-"""Embedding provider protocol and implementations."""
+"""Embedding provider protocol and implementations.
+
+This module defines the EmbeddingProvider protocol and concrete implementations
+for OpenAI, Jina, and Mistral embedding services.
+"""
 
 import threading
 from typing import Protocol
 
 
 class EmbeddingProvider(Protocol):
-    """Protocol for embedding providers."""
-    def get_embedding(self, text: str) -> list[float]: ...
-    def get_embeddings_batch(self, texts: list[str]) -> list[list[float]]: ...
+    """Protocol for embedding providers.
+
+    All embedding providers must implement these methods to be used
+    interchangeably throughout the codebase.
+    """
+
+    def get_embedding(self, text: str) -> list[float]:
+        """Get embedding vector for a single text."""
+        ...
+
+    def get_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
+        """Get embedding vectors for multiple texts."""
+        ...
 
 
 class OpenAIProvider:
-    """OpenAI embedding provider."""
+    """OpenAI text-embedding-3-large provider."""
+
     def get_embedding(self, text: str) -> list[float]:
         from src.embeddings.openai import get_embedding
         return get_embedding(text)
@@ -22,7 +37,8 @@ class OpenAIProvider:
 
 
 class JinaProvider:
-    """Jina embedding provider with late chunking."""
+    """Jina embedding provider with late chunking support."""
+
     def get_embedding(self, text: str) -> list[float]:
         from src.embeddings.jina import get_embedding
         return get_embedding(text)
@@ -33,7 +49,8 @@ class JinaProvider:
 
 
 class MistralProvider:
-    """Mistral Codestral Embed provider."""
+    """Mistral Codestral Embed provider optimized for code."""
+
     def get_embedding(self, text: str) -> list[float]:
         from src.embeddings.mistral import get_embedding
         return get_embedding(text)
@@ -43,13 +60,19 @@ class MistralProvider:
         return get_embeddings_batch(texts)
 
 
+# Thread-safe singleton for provider instance
 _provider: EmbeddingProvider | None = None
 _provider_lock = threading.Lock()
 
 
 def get_provider() -> EmbeddingProvider:
-    """Get the configured embedding provider (thread-safe singleton)."""
+    """Get the configured embedding provider (thread-safe singleton).
+
+    Returns:
+        Configured embedding provider instance
+    """
     global _provider
+
     if _provider is not None:
         return _provider
 
@@ -57,4 +80,5 @@ def get_provider() -> EmbeddingProvider:
         if _provider is None:
             from src.embeddings.backend import get_embedding_provider
             _provider = get_embedding_provider()
+
     return _provider

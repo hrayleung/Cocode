@@ -1,4 +1,12 @@
-"""Indexer service - handles all codebase indexing operations."""
+"""Indexer service - central coordinator for codebase indexing operations.
+
+This module provides the IndexerService which handles:
+- Full indexing of new codebases
+- Incremental updates for changed files
+- Repository name resolution (with collision handling)
+- Path validation and security checks
+- Coordination of chunk, symbol, and centrality indexing
+"""
 
 import fnmatch
 import hashlib
@@ -31,7 +39,16 @@ def _matches_any_pattern(name: str, patterns: list[str]) -> bool:
 
 @dataclass
 class IndexResult:
-    """Result of an indexing operation."""
+    """Result of an indexing operation.
+
+    Attributes:
+        repo_name: Name of the indexed repository
+        status: One of 'created', 'updated', 'unchanged', or 'error'
+        file_count: Number of files indexed
+        chunk_count: Number of chunks created
+        message: Optional status message
+    """
+
     repo_name: str
     status: str
     file_count: int = 0
@@ -40,7 +57,14 @@ class IndexResult:
 
 
 class IndexerService:
-    """Service for indexing codebases."""
+    """Service for indexing codebases.
+
+    Handles full and incremental indexing of codebases with support for:
+    - Automatic repository name resolution with collision handling
+    - Path validation and security checks
+    - Incremental updates based on file modification times
+    - Symbol and centrality indexing coordination
+    """
 
     def __init__(self):
         self._repo_manager = RepoManager()
@@ -48,6 +72,7 @@ class IndexerService:
         self._change_check_cache: dict[str, tuple[float, float, bool]] = {}
 
     def _init_cocoindex(self) -> None:
+        """Initialize CocoIndex with database and API configuration."""
         if self._initialized:
             return
         os.environ["COCOINDEX_DATABASE_URL"] = settings.database_url
@@ -57,7 +82,17 @@ class IndexerService:
 
     @staticmethod
     def path_to_repo_name(path: str) -> str:
-        """Convert a path to a consistent repository name."""
+        """Convert a path to a consistent repository name.
+
+        Normalizes the directory name to lowercase with underscores,
+        removing special characters.
+
+        Args:
+            path: Path to convert
+
+        Returns:
+            Normalized repository name
+        """
         import re
         name = Path(path).resolve().name.lower()
         name = re.sub(r'[-. ]+', '_', name)
@@ -124,11 +159,11 @@ class IndexerService:
 
             # Check if path exists
             if not resolved.exists():
-                raise PathError(f"Path does not exist")
+                raise PathError(f"Path does not exist: {resolved}")
 
             # Check if it's a directory
             if not resolved.is_dir():
-                raise PathError(f"Path is not a directory")
+                raise PathError(f"Path is not a directory: {resolved}")
 
             # Warn if path is a symlink (but allow it)
             original_path = Path(path)
@@ -139,8 +174,8 @@ class IndexerService:
             # Try to list the directory to verify read permissions
             try:
                 next(resolved.iterdir(), None)
-            except PermissionError:
-                raise PathError(f"Insufficient permissions to read directory")
+            except PermissionError as e:
+                raise PathError(f"Insufficient permissions to read directory: {resolved}") from e
             except StopIteration:
                 # Empty directory is fine
                 pass
