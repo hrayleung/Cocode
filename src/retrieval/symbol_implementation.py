@@ -43,6 +43,23 @@ class SymbolMatch:
     def key(self) -> tuple:
         return (self.filename, self.symbol_name, self.symbol_type, self.line_start, self.line_end)
 
+    @staticmethod
+    def from_row(row: tuple) -> "SymbolMatch":
+        """Create a SymbolMatch from a database row."""
+        return SymbolMatch(
+            filename=row[0],
+            symbol_name=row[1],
+            symbol_type=row[2],
+            line_start=int(row[3]),
+            line_end=int(row[4]),
+            signature=row[5],
+            docstring=row[6],
+            parent_symbol=row[7],
+            visibility=row[8],
+            category=row[9],
+            score=float(row[10]),
+        )
+
 
 def _normalize_weights(weights: list[float] | None, n: int) -> list[float]:
     if not weights:
@@ -101,56 +118,33 @@ def symbol_vector_search(
     schema_name = sanitize_repo_name(repo_name)
     table = sql.Identifier(schema_name, "symbols")
 
-    filename_filter_sql = sql.SQL("")
-    params: list = []
+    # Build query with optional filename filter
+    filename_filter = sql.SQL(" AND filename = ANY(%s)") if filenames else sql.SQL("")
+
+    query_sql = sql.SQL(
+        """
+        SELECT
+            filename,
+            symbol_name,
+            symbol_type,
+            line_start,
+            line_end,
+            signature,
+            docstring,
+            parent_symbol,
+            visibility,
+            category,
+            1 - (embedding <=> %s::vector) AS similarity
+        FROM {table}
+        WHERE embedding IS NOT NULL{filename_filter}
+        ORDER BY embedding <=> %s::vector
+        LIMIT %s
+        """
+    ).format(table=table, filename_filter=filename_filter)
 
     if filenames:
-        filename_filter_sql = sql.SQL(" AND filename = ANY(%s)")
-
-    # Note placeholder order must match params.
-    if filenames:
-        query_sql = sql.SQL(
-            """
-            SELECT
-                filename,
-                symbol_name,
-                symbol_type,
-                line_start,
-                line_end,
-                signature,
-                docstring,
-                parent_symbol,
-                visibility,
-                category,
-                1 - (embedding <=> %s::vector) AS similarity
-            FROM {table}
-            WHERE embedding IS NOT NULL{filename_filter}
-            ORDER BY embedding <=> %s::vector
-            LIMIT %s
-            """
-        ).format(table=table, filename_filter=filename_filter_sql)
         params = [query_embedding, filenames, query_embedding, top_k]
     else:
-        query_sql = sql.SQL(
-            """
-            SELECT
-                filename,
-                symbol_name,
-                symbol_type,
-                line_start,
-                line_end,
-                signature,
-                docstring,
-                parent_symbol,
-                visibility,
-                category,
-                1 - (embedding <=> %s::vector) AS similarity
-            FROM {table}
-            WHERE embedding IS NOT NULL
-            ORDER BY embedding <=> %s::vector
-            LIMIT %s
-            """
-        ).format(table=table)
         params = [query_embedding, query_embedding, top_k]
 
     with get_connection() as conn:
@@ -158,22 +152,7 @@ def symbol_vector_search(
             cur.execute(query_sql, params)
             rows = cur.fetchall()
 
-    return [
-        SymbolMatch(
-            filename=row[0],
-            symbol_name=row[1],
-            symbol_type=row[2],
-            line_start=int(row[3]),
-            line_end=int(row[4]),
-            signature=row[5],
-            docstring=row[6],
-            parent_symbol=row[7],
-            visibility=row[8],
-            category=row[9],
-            score=float(row[10]),
-        )
-        for row in rows
-    ]
+    return [SymbolMatch.from_row(row) for row in rows]
 
 
 def symbol_bm25_search(
@@ -191,54 +170,33 @@ def symbol_bm25_search(
     schema_name = sanitize_repo_name(repo_name)
     table = sql.Identifier(schema_name, "symbols")
 
-    filename_filter_sql = sql.SQL("")
+    # Build query with optional filename filter
+    filename_filter = sql.SQL(" AND filename = ANY(%s)") if filenames else sql.SQL("")
+
+    query_sql = sql.SQL(
+        """
+        SELECT
+            filename,
+            symbol_name,
+            symbol_type,
+            line_start,
+            line_end,
+            signature,
+            docstring,
+            parent_symbol,
+            visibility,
+            category,
+            ts_rank_cd(content_tsv, q, 1) AS rank
+        FROM {table}, plainto_tsquery('english', %s) q
+        WHERE content_tsv @@ q{filename_filter}
+        ORDER BY rank DESC
+        LIMIT %s
+        """
+    ).format(table=table, filename_filter=filename_filter)
 
     if filenames:
-        filename_filter_sql = sql.SQL(" AND filename = ANY(%s)")
-
-    if filenames:
-        query_sql = sql.SQL(
-            """
-            SELECT
-                filename,
-                symbol_name,
-                symbol_type,
-                line_start,
-                line_end,
-                signature,
-                docstring,
-                parent_symbol,
-                visibility,
-                category,
-                ts_rank_cd(content_tsv, q, 1) AS rank
-            FROM {table}, plainto_tsquery('english', %s) q
-            WHERE content_tsv @@ q{filename_filter}
-            ORDER BY rank DESC
-            LIMIT %s
-            """
-        ).format(table=table, filename_filter=filename_filter_sql)
         params = [query, filenames, top_k]
     else:
-        query_sql = sql.SQL(
-            """
-            SELECT
-                filename,
-                symbol_name,
-                symbol_type,
-                line_start,
-                line_end,
-                signature,
-                docstring,
-                parent_symbol,
-                visibility,
-                category,
-                ts_rank_cd(content_tsv, q, 1) AS rank
-            FROM {table}, plainto_tsquery('english', %s) q
-            WHERE content_tsv @@ q
-            ORDER BY rank DESC
-            LIMIT %s
-            """
-        ).format(table=table)
         params = [query, top_k]
 
     with get_connection() as conn:
@@ -246,22 +204,7 @@ def symbol_bm25_search(
             cur.execute(query_sql, params)
             rows = cur.fetchall()
 
-    return [
-        SymbolMatch(
-            filename=row[0],
-            symbol_name=row[1],
-            symbol_type=row[2],
-            line_start=int(row[3]),
-            line_end=int(row[4]),
-            signature=row[5],
-            docstring=row[6],
-            parent_symbol=row[7],
-            visibility=row[8],
-            category=row[9],
-            score=float(row[10]),
-        )
-        for row in rows
-    ]
+    return [SymbolMatch.from_row(row) for row in rows]
 
 
 def symbol_hybrid_search_with_metadata(
