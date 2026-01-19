@@ -60,3 +60,4 @@ Thumbs.db
 comparison_results.json
 cocode.log
 .claude/
+*.json
