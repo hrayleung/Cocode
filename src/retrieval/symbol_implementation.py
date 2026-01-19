@@ -119,7 +119,7 @@ def symbol_vector_search(
     table = sql.Identifier(schema_name, "symbols")
 
     # Build query with optional filename filter
-    filename_filter = sql.SQL(" AND filename = ANY(%s)") if filenames else sql.SQL("")
+    filename_filter = sql.SQL(" AND filename = ANY(%s)") if filenames is not None else sql.SQL("")
 
     query_sql = sql.SQL(
         """
@@ -142,7 +142,7 @@ def symbol_vector_search(
         """
     ).format(table=table, filename_filter=filename_filter)
 
-    if filenames:
+    if filenames is not None:
         params = [query_embedding, filenames, query_embedding, top_k]
     else:
         params = [query_embedding, query_embedding, top_k]
@@ -171,7 +171,7 @@ def symbol_bm25_search(
     table = sql.Identifier(schema_name, "symbols")
 
     # Build query with optional filename filter
-    filename_filter = sql.SQL(" AND filename = ANY(%s)") if filenames else sql.SQL("")
+    filename_filter = sql.SQL(" AND filename = ANY(%s)") if filenames is not None else sql.SQL("")
 
     query_sql = sql.SQL(
         """
@@ -194,7 +194,7 @@ def symbol_bm25_search(
         """
     ).format(table=table, filename_filter=filename_filter)
 
-    if filenames:
+    if filenames is not None:
         params = [query, filenames, top_k]
     else:
         params = [query, top_k]
