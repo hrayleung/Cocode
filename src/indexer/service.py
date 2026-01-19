@@ -93,7 +93,6 @@ class IndexerService:
         Returns:
             Normalized repository name
         """
-        import re
         name = Path(path).resolve().name.lower()
         name = re.sub(r'[-. ]+', '_', name)
         name = re.sub(r'[^a-z0-9_]', '', name).strip('_')
