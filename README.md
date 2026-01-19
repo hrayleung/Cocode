@@ -289,7 +289,7 @@ VS Code supports MCP servers through workspace or user settings.
 
 Codex stores MCP server configs in `~/.codex/config.toml`.
 
-#### Option 1: Add via CLI (Recommended)
+### Option 1: Add via CLI (Recommended)
 
 ```bash
 # Add the server (stdio transport)
