@@ -139,8 +139,8 @@ class IndexerService:
             # Try to list the directory to verify read permissions
             try:
                 next(resolved.iterdir(), None)
-            except PermissionError:
-                raise PathError(f"Insufficient permissions to read directory: {resolved}")
+            except PermissionError as e:
+                raise PathError(f"Insufficient permissions to read directory: {resolved}") from e
             except StopIteration:
                 # Empty directory is fine
                 pass
