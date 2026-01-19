@@ -50,6 +50,8 @@ This combination enables fast, accurate semantic search that stays up-to-date as
 
 ### Setup
 
+#### Standard Installation
+
 ```bash
 # Clone and install
 git clone https://github.com/hrayleung/Cocode.git
@@ -60,6 +62,28 @@ pip install -e ".[dev]"
 cp .env.example .env
 # Edit .env with your API keys
 ```
+
+#### NixOS / Nix Flakes
+
+```bash
+# Clone repository
+git clone https://github.com/hrayleung/Cocode.git
+cd Cocode
+
+# Enter dev shell (includes Python 3.11, PostgreSQL 16, and dependencies)
+nix develop
+
+# Install Python package
+pip install -e ".[dev]"
+
+# Create .env file (automatically copied by shellHook)
+# Edit .env with your API keys
+```
+
+The Nix flake automatically:
+- Sets up PostgreSQL 16 with pgvector in `.postgres/`
+- Creates a Python virtual environment in `venv/`
+- Copies `.env.example` to `.env` if it doesn't exist
 
 ### Required Environment Variables
 
