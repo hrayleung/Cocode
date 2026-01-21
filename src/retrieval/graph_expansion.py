@@ -1,12 +1,11 @@
 """Graph-based expansion to find related files.
 
-Parses imports/dependencies from code files using AST parsing and uses them to
-expand search results with contextually related files.
+Parses imports/dependencies from code files using Tree-sitter AST parsing
+and uses them to expand search results with contextually related files.
 """
 
 import logging
 import json
-import re
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,44 +28,8 @@ class FileRelation:
     hop_distance: int = 1  # How many hops away from the original file
 
 
-# Import patterns for different languages
-IMPORT_PATTERNS = {
-    "python": [
-        re.compile(r'^from\s+([\w.]+)\s+import', re.MULTILINE),
-        re.compile(r'^import\s+([\w.]+)', re.MULTILINE),
-        # Handle imports inside try blocks (common for optional dependencies)
-        re.compile(r'^\s+from\s+([\w.]+)\s+import', re.MULTILINE),
-        re.compile(r'^\s+import\s+([\w.]+)', re.MULTILINE),
-    ],
-    "typescript": [
-        re.compile(r"import\s+.*?\s+from\s+['\"]([^'\"]+)['\"]", re.MULTILINE),
-        re.compile(r"import\s+['\"]([^'\"]+)['\"]", re.MULTILINE),
-        re.compile(r"require\s*\(\s*['\"]([^'\"]+)['\"]\s*\)", re.MULTILINE),
-        re.compile(r"import\s+type\s+\{[^}]+\}\s+from\s+['\"]([^'\"]+)['\"]", re.MULTILINE),
-        re.compile(r"export\s+\*\s+from\s+['\"]([^'\"]+)['\"]", re.MULTILINE),
-    ],
-    "javascript": [
-        re.compile(r"import\s+.*?\s+from\s+['\"]([^'\"]+)['\"]", re.MULTILINE),
-        re.compile(r"import\s+['\"]([^'\"]+)['\"]", re.MULTILINE),
-        re.compile(r"require\s*\(\s*['\"]([^'\"]+)['\"]\s*\)", re.MULTILINE),
-    ],
-    "go": [
-        re.compile(r'import\s+["\']([^"\']+)["\']', re.MULTILINE),
-        re.compile(r'import\s*\(\s*[^)]*?["\']([^"\']+)["\']', re.MULTILINE | re.DOTALL),
-    ],
-    "rust": [
-        re.compile(r'^use\s+([\w:]+)', re.MULTILINE),
-        re.compile(r'^mod\s+(\w+)', re.MULTILINE),
-        re.compile(r'^extern\s+crate\s+\w+', re.MULTILINE),
-    ],
-}
-
-
 def extract_imports(content: str, language: str) -> list[str]:
-    """Extract import statements from code content using AST parsing.
-
-    Uses Tree-sitter AST parsing for accurate import extraction.
-    Falls back to regex if AST parsing is unavailable or fails.
+    """Extract import statements from code content using Tree-sitter AST parsing.
 
     Args:
         content: Source code content
@@ -75,27 +38,10 @@ def extract_imports(content: str, language: str) -> list[str]:
     Returns:
         List of imported module/file paths
     """
-    # Try AST-based extraction first
-    try:
-        imports = extract_imports_ast(content, language)
-        if imports:  # If AST parsing succeeded and found imports
-            logger.debug(f"Extracted {len(imports)} imports using AST parsing for {language}")
-            return imports
-    except Exception as e:
-        logger.debug(f"AST import extraction failed for {language}: {e}, falling back to regex")
-
-    # Fall back to regex-based extraction
-    patterns = IMPORT_PATTERNS.get(language, [])
-    imports = []
-
-    for pattern in patterns:
-        matches = pattern.findall(content)
-        imports.extend(matches)
-
+    imports = extract_imports_ast(content, language)
     if imports:
-        logger.debug(f"Extracted {len(imports)} imports using regex for {language}")
-
-    return list(set(imports))
+        logger.debug(f"Extracted {len(imports)} imports using AST parsing for {language}")
+    return imports
 
 
 def resolve_import_to_file(

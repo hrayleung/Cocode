@@ -23,6 +23,8 @@ pub struct BM25Engine {
     b: f32,
     /// BM25+ delta parameter (lower bound for term frequency)
     delta: f32,
+    /// Cached tokenized documents from indexing
+    tokenized_docs: Vec<Vec<String>>,
 }
 
 #[pymethods]
@@ -45,6 +47,7 @@ impl BM25Engine {
             k1,
             b,
             delta,
+            tokenized_docs: Vec::new(),
         }
     }
 
@@ -57,19 +60,20 @@ impl BM25Engine {
         self.df.clear();
         self.idf.clear();
         self.doc_lengths.clear();
+        self.tokenized_docs.clear();
 
         self.num_docs = documents.len();
         self.doc_lengths.reserve(documents.len());
 
-        // Tokenize all documents in parallel
-        let tokenized_docs: Vec<Vec<String>> = documents
+        // Tokenize all documents in parallel and cache
+        self.tokenized_docs = documents
             .par_iter()
             .map(|doc| tokenize(doc))
             .collect();
 
         // Calculate document lengths (explicit loop to avoid mutation in iterator)
         let mut total_length: usize = 0;
-        for tokens in &tokenized_docs {
+        for tokens in &self.tokenized_docs {
             let len = tokens.len();
             self.doc_lengths.push(len);
             total_length += len;
@@ -83,7 +87,7 @@ impl BM25Engine {
         };
 
         // Calculate document frequencies
-        for tokens in &tokenized_docs {
+        for tokens in &self.tokenized_docs {
             let mut seen_terms = AHashMap::new();
             for term in tokens {
                 seen_terms.insert(term.clone(), true);
@@ -100,45 +104,36 @@ impl BM25Engine {
         }
     }
 
-    /// Score documents against a query using BM25+
+    /// Score indexed documents against a query using BM25+
     ///
     /// Args:
     ///     query: Query string
-    ///     documents: List of document strings to score
     ///     top_k: Number of top results to return (default: None for all)
     ///     score_threshold: Minimum score threshold for results (default: 0.0)
     ///
     /// Returns:
     ///     List of (doc_index, score) tuples, sorted by score descending
-    #[pyo3(signature = (query, documents, top_k=None, score_threshold=0.0))]
+    #[pyo3(signature = (query, top_k=None, score_threshold=0.0))]
     fn score(
         &self,
         py: Python,
         query: String,
-        documents: Vec<String>,
         top_k: Option<usize>,
         score_threshold: f32,
     ) -> PyResult<Vec<(usize, f32)>> {
-        // Validate that documents match the indexed corpus
         if self.num_docs == 0 {
             return Ok(Vec::new());
-        }
-        if documents.len() != self.num_docs {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "documents must match the indexed corpus (call index before score)",
-            ));
         }
 
         let query_terms = tokenize(&query);
 
-        // Parallel scoring with WAND-inspired early termination
+        // Parallel scoring using cached tokenized docs
         let scores: Vec<(usize, f32)> = py.detach(|| {
-            documents
+            self.tokenized_docs
                 .par_iter()
                 .enumerate()
-                .filter_map(|(idx, doc)| {
-                    let doc_tokens = tokenize(doc);
-                    let score = self.score_document(&query_terms, &doc_tokens, idx);
+                .filter_map(|(idx, doc_tokens)| {
+                    let score = self.score_document(&query_terms, doc_tokens, idx);
 
                     // Early filtering based on threshold
                     if score > score_threshold {
@@ -240,11 +235,11 @@ mod tests {
             "quick brown dogs".to_string(),
         ];
 
-        engine.index(docs.clone());
+        engine.index(docs);
 
         // Query for "quick brown"
         let results = Python::with_gil(|py| {
-            engine.score(py, "quick brown".to_string(), docs, None, 0.0)
+            engine.score(py, "quick brown".to_string(), None, 0.0)
         }).unwrap();
 
         // First and third documents should score higher
@@ -262,11 +257,11 @@ mod tests {
             "completely unrelated content".to_string(),
         ];
 
-        engine.index(docs.clone());
+        engine.index(docs);
 
         // Query with high threshold should filter out low-scoring docs
         let results = Python::with_gil(|py| {
-            engine.score(py, "quick brown".to_string(), docs, None, 5.0)
+            engine.score(py, "quick brown".to_string(), None, 5.0)
         }).unwrap();
 
         // Should have fewer results due to threshold

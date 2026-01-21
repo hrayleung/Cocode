@@ -168,9 +168,14 @@ pub fn bfs_expansion(
 
     // BFS traversal
     while let Some((current, hop)) = queue.pop_front() {
-        // Early termination if we've reached limits
-        if hop >= max_hops || hop_distances.len() >= max_results {
+        // Stop if we've hit max_results
+        if hop_distances.len() >= max_results {
             break;
+        }
+
+        // Skip expanding neighbors if next hop would exceed max_hops
+        if hop >= max_hops {
+            continue;
         }
 
         let next_hop = hop + 1;
@@ -178,7 +183,10 @@ pub fn bfs_expansion(
         // Traverse forward edges
         if let Some(neighbors) = forward_edges.get(&current) {
             for neighbor in neighbors {
-                if !visited.contains(neighbor) && hop_distances.len() < max_results {
+                if hop_distances.len() >= max_results {
+                    break;
+                }
+                if !visited.contains(neighbor) {
                     visited.insert(neighbor.clone());
                     hop_distances.insert(neighbor.clone(), next_hop);
                     queue.push_back((neighbor.clone(), next_hop));
@@ -190,7 +198,10 @@ pub fn bfs_expansion(
         if bidirectional {
             if let Some(neighbors) = backward_edges.get(&current) {
                 for neighbor in neighbors {
-                    if !visited.contains(neighbor) && hop_distances.len() < max_results {
+                    if hop_distances.len() >= max_results {
+                        break;
+                    }
+                    if !visited.contains(neighbor) {
                         visited.insert(neighbor.clone());
                         hop_distances.insert(neighbor.clone(), next_hop);
                         queue.push_back((neighbor.clone(), next_hop));

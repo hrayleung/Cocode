@@ -7,7 +7,7 @@
   - `src/indexer/`, `src/retrieval/`, `src/parser/`, `src/storage/`, `src/embeddings/`: core subsystems.
 - `config/`: runtime settings loaded from environment/`.env` (`config/settings.py`).
 - `tests/`: pytest suite (files named `tests/test_*.py`).
-- `README.md` / `CLAUDE.md`: usage + architecture notes; `flake.nix` for Nix-based dev setup.
+- `README.md`: usage + architecture notes; `flake.nix` for Nix-based dev setup.
 
 ## Build, Test, and Development Commands
 
@@ -44,4 +44,4 @@ For Nix users, `nix develop` bootstraps a dev shell (see `README.md`).
 
 ## Agent-Specific Notes
 
-- Prefer repository conventions documented in `CLAUDE.md`, keep diffs small, and run `pytest` before submitting changes.
+- Keep diffs small and run `pytest` before submitting changes.

@@ -187,6 +187,7 @@ def get_create_symbols_table_sql(repo_name: str, dimensions: int = 3072) -> sql.
             category TEXT,  -- 'implementation', 'test', 'api', 'config'
             embedding vector({dimensions}),
             content_tsv tsvector,
+            batch_id UUID,  -- Identifies indexing batch for deterministic cleanup
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE (filename, symbol_name, line_start)

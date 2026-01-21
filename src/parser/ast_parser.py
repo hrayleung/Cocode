@@ -4,26 +4,21 @@ This module provides language-aware parsing for import extraction using
 Tree-sitter grammars. It supports Python, Go, Rust, C/C++, JavaScript,
 TypeScript, and TSX.
 
-Falls back gracefully when Tree-sitter is unavailable.
+Tree-sitter is required - no fallback to regex parsing.
 """
 
 import logging
 import threading
 from pathlib import Path
-from typing import Optional
 
-try:
-    from tree_sitter import Language, Parser, Node
-    import tree_sitter_python as ts_python
-    import tree_sitter_go as ts_go
-    import tree_sitter_rust as ts_rust
-    import tree_sitter_c as ts_c
-    import tree_sitter_cpp as ts_cpp
-    import tree_sitter_javascript as ts_javascript
-    import tree_sitter_typescript as ts_typescript
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
+from tree_sitter import Language, Parser, Node
+import tree_sitter_python as ts_python
+import tree_sitter_go as ts_go
+import tree_sitter_rust as ts_rust
+import tree_sitter_c as ts_c
+import tree_sitter_cpp as ts_cpp
+import tree_sitter_javascript as ts_javascript
+import tree_sitter_typescript as ts_typescript
 
 logger = logging.getLogger(__name__)
 
@@ -46,47 +41,39 @@ class LanguageParsers:
         return cls._instance
 
     def __init__(self):
-        if LanguageParsers._initialized or not TREE_SITTER_AVAILABLE:
+        if LanguageParsers._initialized:
             return
 
         with LanguageParsers._lock:
             if LanguageParsers._initialized:
                 return
-            self.languages = {}
-            self.parsers = {}
-            try:
-                self.languages = {
-                    "python": Language(ts_python.language()),
-                    "go": Language(ts_go.language()),
-                    "rust": Language(ts_rust.language()),
-                    "c": Language(ts_c.language()),
-                    "cpp": Language(ts_cpp.language()),
-                    "javascript": Language(ts_javascript.language()),
-                    "typescript": Language(ts_typescript.language_typescript()),
-                    "tsx": Language(ts_typescript.language_tsx()),
-                }
-                self.parsers = {
-                    name: Parser(lang)
-                    for name, lang in self.languages.items()
-                }
-                LanguageParsers._initialized = True
-                logger.info(f"Initialized Tree-sitter parsers for {len(self.parsers)} languages")
-            except Exception as e:
-                logger.error(f"Failed to initialize Tree-sitter parsers: {e}")
-                LanguageParsers._initialized = False
+            self.languages = {
+                "python": Language(ts_python.language()),
+                "go": Language(ts_go.language()),
+                "rust": Language(ts_rust.language()),
+                "c": Language(ts_c.language()),
+                "cpp": Language(ts_cpp.language()),
+                "javascript": Language(ts_javascript.language()),
+                "typescript": Language(ts_typescript.language_typescript()),
+                "tsx": Language(ts_typescript.language_tsx()),
+            }
+            self.parsers = {
+                name: Parser(lang)
+                for name, lang in self.languages.items()
+            }
+            LanguageParsers._initialized = True
+            logger.info(f"Initialized Tree-sitter parsers for {len(self.parsers)} languages")
 
 
-def get_parser(language: str) -> Optional[Parser]:
+def get_parser(language: str) -> Parser | None:
     """Get Tree-sitter parser for a language.
 
     Args:
         language: Language name (e.g., "python", "go")
 
     Returns:
-        Parser instance or None if unavailable
+        Parser instance or None if language not supported
     """
-    if not TREE_SITTER_AVAILABLE:
-        return None
     return LanguageParsers().parsers.get(language)
 
 
@@ -99,7 +86,7 @@ def is_language_supported(language: str) -> bool:
     Returns:
         True if the language can be parsed
     """
-    return TREE_SITTER_AVAILABLE and language in LanguageParsers().parsers
+    return language in LanguageParsers().parsers
 
 
 def extract_python_imports(tree_root: Node, source_bytes: bytes) -> list[str]:
@@ -243,11 +230,7 @@ def extract_javascript_imports(tree_root: Node, source_bytes: bytes) -> list[str
 
 
 def extract_imports_ast(content: str, language: str) -> list[str]:
-    """Extract imports using AST parsing."""
-    if not TREE_SITTER_AVAILABLE:
-        logger.debug("Tree-sitter not available")
-        return []
-
+    """Extract imports using Tree-sitter AST parsing."""
     parser = get_parser(language)
     if not parser:
         logger.debug(f"No parser for language: {language}")
@@ -297,6 +280,6 @@ EXT_TO_AST_LANG = {
 }
 
 
-def get_language_from_file(filename: str) -> Optional[str]:
+def get_language_from_file(filename: str) -> str | None:
     """Get language name from filename extension."""
     return EXT_TO_AST_LANG.get(Path(filename).suffix.lower())

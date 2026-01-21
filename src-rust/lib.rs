@@ -4,6 +4,7 @@ mod vector_ops;
 mod bm25_engine;
 mod graph_algos;
 mod tokenizer;
+mod utils;
 
 #[pymodule]
 fn cocode_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -26,6 +27,11 @@ fn cocode_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tokenizer::tokenize_for_search, m)?)?;
     m.add_function(wrap_pyfunction!(tokenizer::batch_extract_tokens, m)?)?;
     m.add_function(wrap_pyfunction!(tokenizer::batch_tokenize_queries, m)?)?;
+
+    // Utils
+    m.add_function(wrap_pyfunction!(utils::compute_file_hash, m)?)?;
+    m.add_function(wrap_pyfunction!(utils::jaccard_similarity, m)?)?;
+    m.add_function(wrap_pyfunction!(utils::jaccard_similarity_batch, m)?)?;
 
     Ok(())
 }
