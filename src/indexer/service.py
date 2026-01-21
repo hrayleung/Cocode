@@ -205,7 +205,7 @@ class IndexerService:
         if gitignore_path.exists():
             try:
                 ignore_patterns.extend(gitignore_path.read_text().splitlines())
-            except Exception as e:
+            except (OSError, UnicodeDecodeError) as e:
                 logger.debug(f"Could not read .gitignore: {e}")
         
         ignore_spec = GitIgnoreSpec.from_lines(ignore_patterns)

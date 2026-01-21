@@ -1,8 +1,8 @@
 """
 Rust bridge module for accelerated operations.
 
-Provides Python wrappers for Rust functions.
-All modules gracefully fall back to Python implementations if Rust extensions are unavailable.
+Provides Python wrappers for Rust functions from the cocode_rust extension.
+The cocode_rust extension must be installed; ImportError is raised if missing.
 """
 
 from .vector_ops import (

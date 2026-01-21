@@ -29,5 +29,5 @@ def bfs_expansion(
 
 
 def strongly_connected_components(edges: list[tuple[str, str]]) -> list[list[str]]:
-    """Detect SCCs using Tarjan's algorithm. Returns list of component node lists."""
+    """Detect SCCs using Kosaraju's algorithm. Returns list of component node lists."""
     return _rust_scc(edges)
