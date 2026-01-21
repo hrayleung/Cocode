@@ -114,8 +114,37 @@ class Settings:
         ".md", ".mdx",
     ])
     excluded_patterns: list[str] = field(default_factory=lambda: [
-        ".*", "__pycache__", "node_modules", "target",
-        "dist", "build", ".git", "venv", ".venv"
+        # Version control
+        ".git/",
+        ".svn/",
+        ".hg/",
+        # Python
+        "__pycache__/",
+        "*.pyc",
+        ".venv/",
+        "venv/",
+        "*.egg-info/",
+        ".eggs/",
+        "site-packages/",
+        ".tox/",
+        ".nox/",
+        ".pytest_cache/",
+        ".mypy_cache/",
+        ".ruff_cache/",
+        # JavaScript/Node
+        "node_modules/",
+        # Build outputs
+        "target/",
+        "dist/",
+        "build/",
+        "out/",
+        # IDE/Editor
+        ".idea/",
+        ".vscode/",
+        "*.swp",
+        # Other
+        ".cache/",
+        "*.log",
     ])
 
 

@@ -22,7 +22,10 @@ pytest -v                                     # Verbose output
 pytest tests/test_file_categorizer.py        # Single test file
 pytest tests/test_file_categorizer.py::TestFileCategorizerDetection::test_python_test_files -v  # Single test method
 pytest -k "test_python"                       # Run tests matching pattern
+pytest --cov=src --cov-report=html            # With coverage report
 ```
+
+For Nix users, `nix develop` bootstraps a development shell with PostgreSQL 16, Python 3.11, and all dependencies pre-configured.
 
 ## Architecture
 
@@ -183,6 +186,7 @@ Computes PageRank scores from import relationships to identify structurally impo
 - Handles cycles gracefully (no infinite loops via visited set)
 - Bidirectional: follows both imports (files this file uses) and imported_by (files that use this file)
 - **Graph caching**: Uses cached import graphs when available (30-50% faster)
+- **Security**: Uses parameterized SQL queries with `psycopg.sql.SQL` and `sql.Identifier` to prevent SQL injection
 
 ### Call Graph Analysis
 
@@ -256,3 +260,22 @@ See `.env.example` for complete configuration options.
 **Connection Pooling**: PostgreSQL connection pool managed in `src/storage/postgres.py` with automatic cleanup.
 
 **Caching**: CocoIndex flows use behavior-versioned caching - increment version in `src/indexer/flow.py` to bust cache.
+
+## Coding Conventions
+
+**Import Organization**: Follow Python conventions:
+- Standard library imports first (alphabetically sorted)
+- Blank line separator
+- Third-party imports (alphabetically sorted)
+- Blank line separator
+- Local/relative imports (alphabetically sorted)
+
+**SQL Safety**: Always use parameterized queries with `psycopg.sql.SQL` and `sql.Identifier` for table names, never f-strings, to prevent SQL injection.
+
+**Commit Messages**: Use Conventional Commits format (imperative, present tense):
+- `feat:` - New features
+- `fix:` - Bug fixes
+- `refactor:` - Code restructuring without behavior change
+- `docs:` - Documentation changes
+- `chore:` - Build/tooling changes
+- `test:` - Test additions or modifications

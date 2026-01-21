@@ -61,3 +61,11 @@ comparison_results.json
 cocode.log
 .claude/
 *.json
+
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+CLAUDE.md
