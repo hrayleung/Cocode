@@ -60,7 +60,6 @@ Thumbs.db
 comparison_results.json
 cocode.log
 .claude/
-*.json
 
 # Rust build artifacts
 /target/

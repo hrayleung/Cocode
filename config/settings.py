@@ -67,7 +67,7 @@ class Settings:
     # Cohere (reranking)
     cohere_api_key: str = field(default_factory=lambda: os.getenv("COHERE_API_KEY", ""))
     rerank_model: str = field(default_factory=lambda: os.getenv("RERANK_MODEL", "rerank-v3.5"))
-    enable_reranker: bool = field(default_factory=lambda: os.getenv("ENABLE_RERANKER", "false").lower() == "true")
+    enable_reranker: bool = field(default_factory=lambda: os.getenv("ENABLE_RERANKER", "true").lower() == "true")
 
     # Indexing
     chunk_size: int = field(default_factory=lambda: _get_int_env("CHUNK_SIZE", 2000, min_val=100))

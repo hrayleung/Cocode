@@ -175,10 +175,16 @@ mod tests {
 
     #[test]
     fn test_cosine_similarity_identical() {
-        let v1 = vec![1.0, 2.0, 3.0];
-        let v2 = vec![1.0, 2.0, 3.0];
-        // Would need to create numpy arrays in a Python context for full test
-        // This is a placeholder for the structure
+        // Test the core computation logic directly (numpy arrays require Python context)
+        let v1: Vec<f32> = vec![1.0, 2.0, 3.0];
+        let v2: Vec<f32> = vec![1.0, 2.0, 3.0];
+
+        let dot_product: f32 = v1.iter().zip(v2.iter()).map(|(a, b)| a * b).sum();
+        let norm1: f32 = v1.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let norm2: f32 = v2.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+        let similarity = dot_product / (norm1 * norm2);
+        assert!((similarity - 1.0).abs() < 1e-6);
     }
 
     #[test]

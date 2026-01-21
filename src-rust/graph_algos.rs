@@ -149,8 +149,16 @@ pub fn bfs_expansion(
     let mut hop_distances: HashMap<String, usize> = HashMap::new();
     let mut queue: VecDeque<(String, usize)> = VecDeque::new();
 
-    // Initialize with start nodes
+    // Early return if max_results is 0
+    if max_results == 0 {
+        return Ok(HashMap::new());
+    }
+
+    // Initialize with start nodes, respecting max_results limit
     for node in start_nodes {
+        if hop_distances.len() >= max_results {
+            break;
+        }
         if !visited.contains(&node) {
             visited.insert(node.clone());
             hop_distances.insert(node.clone(), 0);

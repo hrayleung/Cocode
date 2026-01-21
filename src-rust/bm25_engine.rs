@@ -53,8 +53,13 @@ impl BM25Engine {
     /// Args:
     ///     documents: List of document strings to index
     fn index(&mut self, documents: Vec<String>) {
+        // Clear previous state to avoid accumulating stale stats on re-index
+        self.df.clear();
+        self.idf.clear();
+        self.doc_lengths.clear();
+
         self.num_docs = documents.len();
-        self.doc_lengths = Vec::with_capacity(documents.len());
+        self.doc_lengths.reserve(documents.len());
 
         // Tokenize all documents in parallel
         let tokenized_docs: Vec<Vec<String>> = documents
@@ -114,6 +119,16 @@ impl BM25Engine {
         top_k: Option<usize>,
         score_threshold: f32,
     ) -> PyResult<Vec<(usize, f32)>> {
+        // Validate that documents match the indexed corpus
+        if self.num_docs == 0 {
+            return Ok(Vec::new());
+        }
+        if documents.len() != self.num_docs {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "documents must match the indexed corpus (call index before score)",
+            ));
+        }
+
         let query_terms = tokenize(&query);
 
         // Parallel scoring with WAND-inspired early termination
