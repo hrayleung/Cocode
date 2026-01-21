@@ -17,7 +17,6 @@ ahash = "0.8"
 smallvec = "1.13"
 
 # BM25 and text processing
-bm25 = "0.3"
 unicode-segmentation = "1.12"
 
 # Graph algorithms

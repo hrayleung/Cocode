@@ -193,7 +193,8 @@ class IndexerService:
     def _iter_relevant_files(self, repo_path: str):
         """Yield (full_path, relative_path_str) for index-relevant files.
         
-        Respects .gitignore files in the repository for filtering.
+        Respects the root .gitignore file in the repository for filtering.
+        Note: Nested .gitignore files are not currently supported.
         """
         repo_path_obj = Path(repo_path)
         included_ext = {ext.lower() for ext in settings.included_extensions}

@@ -206,12 +206,12 @@ mod tests {
     fn test_extract_code_tokens() {
         let tokens = extract_code_tokens("getUserById");
         assert!(tokens.contains(&"user".to_string()));
-        assert!(tokens.contains(&"by".to_string()) == false); // too short or stop word
-        assert!(tokens.contains(&"id".to_string()) == false); // too short
+        assert!(!tokens.contains(&"by".to_string())); // too short or stop word
+        assert!(!tokens.contains(&"id".to_string())); // too short
         
         let tokens = extract_code_tokens("user_name_validator");
         assert!(tokens.contains(&"user".to_string()));
-        assert!(tokens.contains(&"name".to_string()) == false); // stop word
+        assert!(!tokens.contains(&"name".to_string())); // stop word
         assert!(tokens.contains(&"validator".to_string()));
     }
 

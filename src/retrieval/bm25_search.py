@@ -204,8 +204,8 @@ def ensure_fts_index(repo_name: str) -> bool:
     if ok:
         try:
             _content_tsv_cache.set(get_chunks_table_name(repo_name), True)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to prime content_tsv cache for {repo_name}: {e}")
     return ok
 
 

@@ -3,6 +3,16 @@ use pyo3::prelude::*;
 use rayon::prelude::*;
 use std::collections::HashMap;
 
+/// Sort comparison that handles NaN values by pushing them to the end
+fn cmp_scores_desc(a: &(String, f32), b: &(String, f32)) -> std::cmp::Ordering {
+    match (a.1.is_nan(), b.1.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal),
+    }
+}
+
 /// Compute cosine similarity between two vectors
 ///
 /// Args:
@@ -117,7 +127,7 @@ pub fn reciprocal_rank_fusion(
     }
 
     let mut result: Vec<(String, f32)> = scores.into_iter().collect();
-    result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    result.sort_by(cmp_scores_desc);
 
     Ok(result)
 }
@@ -154,7 +164,7 @@ pub fn reciprocal_rank_fusion_weighted(
     }
 
     let mut result: Vec<(String, f32)> = scores.into_iter().collect();
-    result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    result.sort_by(cmp_scores_desc);
 
     Ok(result)
 }

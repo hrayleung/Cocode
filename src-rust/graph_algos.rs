@@ -170,14 +170,10 @@ pub fn bfs_expansion(
         // Traverse forward edges
         if let Some(neighbors) = forward_edges.get(&current) {
             for neighbor in neighbors {
-                if !visited.contains(neighbor) {
+                if !visited.contains(neighbor) && hop_distances.len() < max_results {
                     visited.insert(neighbor.clone());
                     hop_distances.insert(neighbor.clone(), next_hop);
                     queue.push_back((neighbor.clone(), next_hop));
-
-                    if hop_distances.len() >= max_results {
-                        break;
-                    }
                 }
             }
         }
@@ -186,21 +182,13 @@ pub fn bfs_expansion(
         if bidirectional {
             if let Some(neighbors) = backward_edges.get(&current) {
                 for neighbor in neighbors {
-                    if !visited.contains(neighbor) {
+                    if !visited.contains(neighbor) && hop_distances.len() < max_results {
                         visited.insert(neighbor.clone());
                         hop_distances.insert(neighbor.clone(), next_hop);
                         queue.push_back((neighbor.clone(), next_hop));
-
-                        if hop_distances.len() >= max_results {
-                            break;
-                        }
                     }
                 }
             }
-        }
-
-        if hop_distances.len() >= max_results {
-            break;
         }
     }
 

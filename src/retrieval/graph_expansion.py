@@ -311,14 +311,13 @@ def multi_hop_traversal(
                             came_from = start
                             relation = "imports"
                             break
-                        elif start in reverse_graph.get(target_file, []):
-                            came_from = target_file
+                        elif target_file in reverse_graph.get(start, []):
+                            came_from = start
                             relation = "imported_by"
                             break
 
                     # For multi-hop: trace back to find nearest start file
                     if came_from is None and hop_dist > 1:
-                        from collections import deque
                         trace_visited = {target_file}
                         trace_queue = deque([(target_file, 0)])
                         while trace_queue and came_from is None:

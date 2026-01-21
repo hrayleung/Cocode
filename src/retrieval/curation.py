@@ -327,8 +327,9 @@ def curate_code_sections(
     query_embedding = None
     try:
         query_embedding = get_query_embedding(q)
-    except Exception:
+    except Exception as e:
         # Still proceed with BM25/symbol BM25 fallbacks.
+        logger.debug(f"Query embedding failed; falling back to sparse search: {e}")
         query_embedding = None
 
     include_tests_resolved = _query_mentions_tests(q) if include_tests is None else include_tests
