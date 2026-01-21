@@ -30,6 +30,26 @@ from .vector_search import vector_search
 
 logger = logging.getLogger(__name__)
 
+_SEARCH_EXECUTOR: ThreadPoolExecutor | None = None
+_SEARCH_EXECUTOR_LOCK = threading.Lock()
+
+# Parallel backends are I/O-heavy (DB + embedding HTTP). Keep the pool modest to
+# avoid excess memory/thread overhead while still allowing concurrent queries.
+_SEARCH_EXECUTOR_MAX_WORKERS = 8
+
+
+def _get_search_executor() -> ThreadPoolExecutor:
+    global _SEARCH_EXECUTOR
+    if _SEARCH_EXECUTOR is not None:
+        return _SEARCH_EXECUTOR
+    with _SEARCH_EXECUTOR_LOCK:
+        if _SEARCH_EXECUTOR is None:
+            _SEARCH_EXECUTOR = ThreadPoolExecutor(
+                max_workers=_SEARCH_EXECUTOR_MAX_WORKERS,
+                thread_name_prefix="cocode-search",
+            )
+    return _SEARCH_EXECUTOR
+
 
 def apply_centrality_boost(
     results: list[SearchResult],
@@ -99,28 +119,30 @@ def reciprocal_rank_fusion(
 
     weights = _normalize_rrf_weights(weights, len(result_lists))
 
-    # Accumulate RRF scores
-    scores: dict[str, float] = defaultdict(float)
-    results_map: dict[str, SearchResult] = {}
+    from src.rust_bridge import reciprocal_rank_fusion_weighted as rust_rrf
 
-    for weight, results in zip(weights, result_lists, strict=True):
+    rust_input = []
+    key_to_result: dict[str, SearchResult] = {}
+
+    for results in result_lists:
+        rust_list = []
         for rank, result in enumerate(results):
             key = f"{result.filename}:{result.location}:{hash(result.content.strip())}"
-            scores[key] += weight / (k + rank + 1)
+            rust_list.append((key, result.score))
+            if key not in key_to_result or result.score > key_to_result[key].score:
+                key_to_result[key] = result
+        rust_input.append(rust_list)
 
-            # Keep the highest-scored version of each result
-            if key not in results_map or result.score > results_map[key].score:
-                results_map[key] = result
+    fused_scores = rust_rrf(rust_input, weights, k=float(k))
 
-    # Create final results sorted by RRF score
     return [
         SearchResult(
-            filename=results_map[key].filename,
-            location=results_map[key].location,
-            content=results_map[key].content,
-            score=scores[key],
+            filename=key_to_result[key].filename,
+            location=key_to_result[key].location,
+            content=key_to_result[key].content,
+            score=score,
         )
-        for key in sorted(scores, key=scores.get, reverse=True)
+        for key, score in fused_scores
     ]
 
 
@@ -142,17 +164,19 @@ def reciprocal_rank_fusion_by_key(
 
     weights = _normalize_rrf_weights(weights, len(result_lists))
 
-    scores: dict[str, float] = defaultdict(float)
+    from src.rust_bridge import reciprocal_rank_fusion_weighted as rust_rrf
+
     best_rep: dict[str, SearchResult] = {}
     best_rank: dict[str, int] = {}
     best_weight: dict[str, float] = {}
 
+    rust_input = []
     for weight, results in zip(weights, result_lists, strict=True):
+        rust_list = []
         for rank, result in enumerate(results):
             key = key_fn(result)
-            scores[key] += weight / (k + rank + 1)
+            rust_list.append((key, result.score))
 
-            # Choose representative snippet by best rank; break ties by higher list weight.
             if (
                 key not in best_rep
                 or rank < best_rank[key]
@@ -161,15 +185,18 @@ def reciprocal_rank_fusion_by_key(
                 best_rep[key] = result
                 best_rank[key] = rank
                 best_weight[key] = weight
+        rust_input.append(rust_list)
+
+    fused_scores = rust_rrf(rust_input, weights, k=float(k))
 
     return [
         SearchResult(
             filename=best_rep[key].filename,
             location=best_rep[key].location,
             content=best_rep[key].content,
-            score=scores[key],
+            score=score,
         )
-        for key in sorted(scores, key=scores.get, reverse=True)
+        for key, score in fused_scores
     ]
 
 
@@ -189,9 +216,11 @@ class _EmbeddingCache:
     search backends request it concurrently.
     """
 
-    def __init__(self, query: str):
+    def __init__(self, query: str, initial_embedding: list[float] | None = None):
         self._query = query
-        self._embedding: list[float] | None = None
+        self._embedding: list[float] | None = (
+            initial_embedding if initial_embedding else None
+        )
         self._error: Exception | None = None
         self._lock = threading.Lock()
 
@@ -246,14 +275,14 @@ def _run_searches_parallel(
         Dictionary mapping search names to outcomes
     """
     outcomes = {}
-    with ThreadPoolExecutor(max_workers=len(searches)) as executor:
-        futures = {name: executor.submit(fn) for name, fn in searches}
-        for name, future in futures.items():
-            try:
-                outcomes[name] = SearchOutcome(results=future.result(timeout=30))
-            except Exception as e:
-                logger.warning(f"{name} search failed: {e}")
-                outcomes[name] = SearchOutcome(failed=True)
+    executor = _get_search_executor()
+    futures = {name: executor.submit(fn) for name, fn in searches}
+    for name, future in futures.items():
+        try:
+            outcomes[name] = SearchOutcome(results=future.result(timeout=30))
+        except Exception as e:
+            logger.warning(f"{name} search failed: {e}")
+            outcomes[name] = SearchOutcome(failed=True)
     return outcomes
 
 
@@ -268,6 +297,7 @@ def hybrid_search(
     symbol_weight: float | None = None,
     parallel: bool = True,
     include_symbols: bool = True,
+    query_embedding: list[float] | None = None,
 ) -> list[SearchResult]:
     """Perform hybrid search combining vector, BM25, and symbol searches.
 
@@ -301,7 +331,7 @@ def hybrid_search(
     bm25_w = bm25_weight if bm25_weight is not None else settings.bm25_weight
     sym_w = symbol_weight if symbol_weight is not None else settings.symbol_weight
 
-    embedding_cache = _EmbeddingCache(query)
+    embedding_cache = _EmbeddingCache(query, initial_embedding=query_embedding)
     bm25_config = BM25Config(k1=settings.bm25_k1, b=settings.bm25_b)
     include_sym = include_symbols and settings.enable_symbol_indexing
 
@@ -324,7 +354,6 @@ def hybrid_search(
     else:
         outcomes = {name: _execute_search(fn, name.capitalize()) for name, fn in searches}
 
-    # Check if all backends failed
     if all(outcomes[name].failed for name in outcomes):
         raise SearchError("All search backends failed")
 

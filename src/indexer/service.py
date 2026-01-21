@@ -8,7 +8,6 @@ This module provides the IndexerService which handles:
 - Coordination of chunk, symbol, and centrality indexing
 """
 
-import fnmatch
 import hashlib
 import logging
 import os
@@ -20,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import cocoindex
+from pathspec import GitIgnoreSpec
 from psycopg import sql
 
 from config.settings import settings
@@ -30,11 +30,6 @@ from src.retrieval.centrality import compute_and_store_centrality, delete_centra
 from src.retrieval.vector_search import get_chunks_table_name
 
 logger = logging.getLogger(__name__)
-
-
-def _matches_any_pattern(name: str, patterns: list[str]) -> bool:
-    """Check if a name matches any of the given fnmatch patterns."""
-    return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
 
 
 @dataclass
@@ -196,17 +191,35 @@ class IndexerService:
             logger.warning(f"Centrality computation failed for {repo_name}: {e}")
 
     def _iter_relevant_files(self, repo_path: str):
-        """Yield (full_path, relative_path_str) for index-relevant files."""
+        """Yield (full_path, relative_path_str) for index-relevant files.
+        
+        Respects the root .gitignore file in the repository for filtering.
+        Note: Nested .gitignore files are not currently supported.
+        """
         repo_path_obj = Path(repo_path)
-        excluded = settings.excluded_patterns
         included_ext = {ext.lower() for ext in settings.included_extensions}
+        
+        # Build ignore spec from .gitignore + default patterns
+        ignore_patterns = list(settings.excluded_patterns)
+        gitignore_path = repo_path_obj / ".gitignore"
+        if gitignore_path.exists():
+            try:
+                ignore_patterns.extend(gitignore_path.read_text().splitlines())
+            except (OSError, UnicodeDecodeError) as e:
+                logger.debug(f"Could not read .gitignore: {e}")
+        
+        ignore_spec = GitIgnoreSpec.from_lines(ignore_patterns)
 
         for root, dirnames, filenames in os.walk(repo_path, topdown=True):
-            dirnames[:] = [d for d in dirnames if not d.startswith(".") and not _matches_any_pattern(d, excluded)]
+            rel_root = Path(root).relative_to(repo_path_obj)
+            
+            # Filter directories in-place using gitignore spec
+            dirnames[:] = [
+                d for d in dirnames 
+                if not ignore_spec.match_file(str(rel_root / d) + "/")
+            ]
 
             for filename in filenames:
-                if filename.startswith(".") or _matches_any_pattern(filename, excluded):
-                    continue
                 if os.path.splitext(filename)[1].lower() not in included_ext:
                     continue
 
@@ -216,8 +229,11 @@ class IndexerService:
                 except ValueError:
                     continue
 
-                if not any(_matches_any_pattern(part, excluded) for part in relative.parts):
-                    yield full_path, str(relative)
+                # Check if file matches ignore patterns
+                if ignore_spec.match_file(str(relative)):
+                    continue
+                    
+                yield full_path, str(relative)
 
     def _has_files_changed(self, repo_name: str, repo_path: str) -> bool:
         """Check if any indexed files have changed since last indexing."""

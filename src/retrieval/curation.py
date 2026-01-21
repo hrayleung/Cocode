@@ -324,6 +324,14 @@ def curate_code_sections(
     if not q:
         return []
 
+    query_embedding = None
+    try:
+        query_embedding = get_query_embedding(q)
+    except Exception as e:
+        # Still proceed with BM25/symbol BM25 fallbacks.
+        logger.debug(f"Query embedding failed; falling back to sparse search: {e}")
+        query_embedding = None
+
     include_tests_resolved = _query_mentions_tests(q) if include_tests is None else include_tests
 
     # Rank files using chunk-based hybrid search (avoid symbol backend dominating file ranking).
@@ -333,6 +341,7 @@ def curate_code_sections(
         top_k=max(20, max_files * 5),
         include_symbols=False,
         use_reranker=bool(settings.cohere_api_key) and bool(settings.enable_reranker),
+        query_embedding=query_embedding,
     )
 
     ranked_files: list[str] = []
@@ -365,13 +374,6 @@ def curate_code_sections(
 
     if not selected_files:
         return []
-
-    query_embedding = None
-    try:
-        query_embedding = get_query_embedding(q)
-    except Exception:
-        # Still proceed with BM25/symbol BM25 fallbacks.
-        query_embedding = None
 
     # Symbol-first spans.
     spans: list[LineSpan] = []
