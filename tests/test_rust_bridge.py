@@ -81,7 +81,7 @@ class TestBM25Engine:
         ]
 
         engine.index(docs)
-        results = engine.score("quick brown", docs)
+        results = engine.score("quick brown")
 
         # First and third documents should score higher
         assert len(results) >= 2
@@ -97,7 +97,7 @@ class TestBM25Engine:
         ]
 
         engine.index(docs)
-        results = engine.score("quick brown", docs, score_threshold=5.0)
+        results = engine.score("quick brown", score_threshold=5.0)
 
         # Should filter out low-scoring docs
         assert len(results) <= 2
@@ -108,7 +108,7 @@ class TestBM25Engine:
         docs = [f"document number {i}" for i in range(100)]
 
         engine.index(docs)
-        results = engine.score("document", docs, top_k=5)
+        results = engine.score("document", top_k=5)
 
         assert len(results) == 5
 

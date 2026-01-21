@@ -10,7 +10,6 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 from psycopg import sql
-from psycopg.errors import UndefinedSchema, UndefinedTable
 
 from src.storage.postgres import get_connection
 from src.storage.schema import sanitize_repo_name
@@ -395,3 +394,112 @@ def delete_symbol_edges(repo_name: str, symbol_id: str) -> int:
             deleted = cur.rowcount
             conn.commit()
             return deleted
+
+
+@dataclass
+class SymbolReference:
+    """A reference to a symbol (definition or usage)."""
+    filename: str
+    line: int
+    ref_type: str  # 'definition', 'call', 'import'
+    context: str | None = None
+    confidence: float = 1.0
+
+
+def find_symbol_references(
+    repo_name: str,
+    symbol_name: str,
+    include_definitions: bool = True,
+    include_calls: bool = True,
+    min_confidence: float = 0.5,
+) -> list[SymbolReference]:
+    """Find all references to a symbol across the codebase.
+    
+    Args:
+        repo_name: Repository name
+        symbol_name: Name of the symbol to find
+        include_definitions: Include symbol definitions
+        include_calls: Include call sites
+        min_confidence: Minimum confidence for call references
+    
+    Returns:
+        List of SymbolReference objects sorted by filename, line
+    """
+    schema_name = sanitize_repo_name(repo_name)
+    symbols_table = sql.Identifier(schema_name, "symbols")
+    edges_table = sql.Identifier(schema_name, "edges")
+    
+    references: list[SymbolReference] = []
+    
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            # Find definitions
+            if include_definitions:
+                cur.execute(
+                    sql.SQL("""
+                        SELECT filename, line_start, signature
+                        FROM {table}
+                        WHERE symbol_name = %s
+                        ORDER BY filename, line_start
+                    """).format(table=symbols_table),
+                    (symbol_name,)
+                )
+                for row in cur.fetchall():
+                    references.append(SymbolReference(
+                        filename=row[0],
+                        line=row[1],
+                        ref_type='definition',
+                        context=row[2],
+                        confidence=1.0,
+                    ))
+            
+            # Find call sites
+            if include_calls:
+                try:
+                    cur.execute(
+                        sql.SQL("""
+                            SELECT source_file, source_line, context, confidence
+                            FROM {table}
+                            WHERE target_symbol_name = %s AND confidence >= %s
+                            ORDER BY source_file, source_line
+                        """).format(table=edges_table),
+                        (symbol_name, min_confidence)
+                    )
+                    for row in cur.fetchall():
+                        references.append(SymbolReference(
+                            filename=row[0],
+                            line=row[1],
+                            ref_type='call',
+                            context=row[2],
+                            confidence=row[3],
+                        ))
+                except Exception as e:
+                    # Edges table may not exist yet - log at debug level
+                    logger.debug(f"Could not query edges table: {e}")
+    
+    # Sort by filename, then line
+    references.sort(key=lambda r: (r.filename, r.line))
+    return references
+
+
+def get_symbol_usages_summary(repo_name: str, symbol_name: str) -> dict:
+    """Get a summary of symbol usage across the codebase.
+    
+    Returns:
+        Dict with definition_count, call_count, files list
+    """
+    refs = find_symbol_references(repo_name, symbol_name)
+    
+    definitions = [r for r in refs if r.ref_type == 'definition']
+    calls = [r for r in refs if r.ref_type == 'call']
+    files = sorted(set(r.filename for r in refs))
+    
+    return {
+        'symbol_name': symbol_name,
+        'definition_count': len(definitions),
+        'call_count': len(calls),
+        'total_references': len(refs),
+        'files': files,
+        'definitions': [{'file': d.filename, 'line': d.line} for d in definitions],
+        'calls': [{'file': c.filename, 'line': c.line, 'confidence': c.confidence} for c in calls],
+    }

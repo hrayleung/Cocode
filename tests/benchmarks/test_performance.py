@@ -84,7 +84,7 @@ class TestBM25Benchmarks:
         """Benchmark Rust BM25 scoring."""
         engine = BM25Engine()
         engine.index(documents)
-        result = benchmark(engine.score, "machine learning neural networks", documents, top_k=10)
+        result = benchmark(engine.score, "machine learning neural networks", top_k=10)
         assert len(result) <= 10
 
 

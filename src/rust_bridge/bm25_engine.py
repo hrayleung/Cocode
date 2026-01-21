@@ -1,7 +1,5 @@
 """Python wrapper for Rust-accelerated BM25 scoring engine."""
 
-from typing import Optional
-
 from cocode_rust import BM25Engine as _RustBM25Engine
 
 
@@ -13,18 +11,17 @@ class BM25Engine:
         self._engine = _RustBM25Engine(k1, b, delta)
 
     def index(self, documents: list[str]) -> None:
-        """Index a corpus of documents."""
+        """Index a corpus of documents (tokenizes and caches for scoring)."""
         self._engine.index(documents)
 
     def score(
         self,
         query: str,
-        documents: list[str],
-        top_k: Optional[int] = None,
+        top_k: int | None = None,
         score_threshold: float = 0.0
     ) -> list[tuple[int, float]]:
-        """Score documents against query. Returns (doc_index, score) sorted by score desc."""
-        return self._engine.score(query, documents, top_k, score_threshold)
+        """Score indexed documents against query. Returns (doc_index, score) sorted by score desc."""
+        return self._engine.score(query, top_k, score_threshold)
 
     def get_stats(self) -> dict[str, float]:
         """Get corpus statistics."""

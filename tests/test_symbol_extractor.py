@@ -1,14 +1,7 @@
 """Tests for symbol extraction."""
 
 import pytest
-from src.parser.symbol_extractor import extract_symbols, Symbol, HAS_TREE_SITTER
-
-
-# Skip all tests if Tree-sitter is not available
-pytestmark = pytest.mark.skipif(
-    not HAS_TREE_SITTER,
-    reason="Tree-sitter not available"
-)
+from src.parser.symbol_extractor import extract_symbols, Symbol
 
 
 class TestPythonSymbolExtraction:
@@ -258,6 +251,69 @@ func TestUserCreation(t *testing.T) {
         test_func = next((s for s in symbols if s.symbol_name == "TestUserCreation"), None)
         if test_func:
             assert test_func.category == "test"
+
+
+class TestRustSymbolExtraction:
+    """Test Rust symbol extraction."""
+
+    def test_extract_struct(self):
+        """Test extracting Rust struct."""
+        code = """
+pub struct BM25Engine {
+    num_docs: usize,
+}
+"""
+        symbols = extract_symbols(code, "rust", "engine.rs")
+        assert len(symbols) == 1
+        assert symbols[0].symbol_name == "BM25Engine"
+        assert symbols[0].symbol_type == "class"
+        assert symbols[0].visibility == "public"
+
+    def test_extract_impl_methods(self):
+        """Test extracting methods from impl block."""
+        code = """
+impl BM25Engine {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    fn internal_helper(&self) {}
+}
+"""
+        symbols = extract_symbols(code, "rust", "engine.rs")
+        assert len(symbols) == 2
+
+        new_fn = next(s for s in symbols if s.symbol_name == "new")
+        assert new_fn.symbol_type == "method"
+        assert new_fn.parent_symbol == "BM25Engine"
+        assert new_fn.visibility == "public"
+
+        helper = next(s for s in symbols if s.symbol_name == "internal_helper")
+        assert helper.visibility == "private"
+
+    def test_extract_trait(self):
+        """Test extracting Rust trait."""
+        code = """
+pub trait Searchable {
+    fn search(&self, query: &str) -> Vec<String>;
+}
+"""
+        symbols = extract_symbols(code, "rust", "traits.rs")
+        trait_sym = next((s for s in symbols if s.symbol_name == "Searchable"), None)
+        assert trait_sym is not None
+        assert trait_sym.symbol_type == "interface"
+
+    def test_extract_standalone_function(self):
+        """Test extracting standalone Rust function."""
+        code = """
+pub fn tokenize(text: &str) -> Vec<String> {
+    vec![]
+}
+"""
+        symbols = extract_symbols(code, "rust", "utils.rs")
+        assert len(symbols) == 1
+        assert symbols[0].symbol_type == "function"
+        assert symbols[0].parent_symbol is None
 
 
 class TestEdgeCases:

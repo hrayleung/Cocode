@@ -142,6 +142,7 @@ def symbol_vector_search(
         """
     ).format(table=table, filename_filter=filename_filter)
 
+    # Params order: similarity %s, [filename ANY(%s) if filter], ORDER BY %s, LIMIT %s
     if filenames is not None:
         params = [query_embedding, filenames, query_embedding, top_k]
     else:
@@ -284,7 +285,10 @@ def _safe_resolve_file(repo_root: Path, filename: str) -> Path:
             raise ValueError("file escapes repo root")
     except AttributeError:
         # Python < 3.9
-        resolved.relative_to(repo_root)
+        try:
+            resolved.relative_to(repo_root)
+        except ValueError:
+            raise ValueError("file escapes repo root")
 
     return resolved
 
@@ -328,7 +332,7 @@ def extract_symbol_code(
     slice_lines = lines[line_start - 1:clamped_end]
 
     if max_code_chars is None:
-        extracted_end = line_start + len(slice_lines) - 1
+        extracted_end = line_start + len(slice_lines) - 1 if slice_lines else line_start - 1
         return {
             "code": "".join(slice_lines),
             "extracted_line_start": line_start,

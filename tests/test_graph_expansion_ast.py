@@ -63,18 +63,16 @@ import type { User } from './types';
         assert "@angular/core" in imports
         assert "./types" in imports
 
-    def test_fallback_to_regex_on_error(self):
-        """Test that regex fallback works when AST parsing fails."""
+    def test_invalid_syntax_handles_gracefully(self):
+        """Test that invalid syntax is handled gracefully (returns list, may be partial)."""
         # Invalid Python syntax
         code = """
 import os
 def broken(
 """
-        # Should still extract the import using regex fallback
+        # Should return a list - may contain partial results from valid portion
         imports = extract_imports(code, "python")
         assert isinstance(imports, list)
-        # May or may not contain "os" depending on parser behavior
-        # but should not crash
 
     def test_empty_code(self):
         """Test with empty code."""
@@ -90,9 +88,8 @@ def hello():
         imports = extract_imports(code, "python")
         assert imports == []
 
-    def test_unsupported_language_fallback(self):
-        """Test that unsupported languages fall back to regex."""
-        # For a language that's in EXT_TO_LANG but has no regex patterns
+    def test_unsupported_language_returns_empty(self):
+        """Test that unsupported languages return empty list."""
         imports = extract_imports("import foo", "unknown")
         assert imports == []
 

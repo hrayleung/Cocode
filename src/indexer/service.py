@@ -34,16 +34,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class IndexResult:
-    """Result of an indexing operation.
-
-    Attributes:
-        repo_name: Name of the indexed repository
-        status: One of 'created', 'updated', 'unchanged', or 'error'
-        file_count: Number of files indexed
-        chunk_count: Number of chunks created
-        message: Optional status message
-    """
-
+    """Result of an indexing operation."""
     repo_name: str
     status: str
     file_count: int = 0
@@ -52,14 +43,7 @@ class IndexResult:
 
 
 class IndexerService:
-    """Service for indexing codebases.
-
-    Handles full and incremental indexing of codebases with support for:
-    - Automatic repository name resolution with collision handling
-    - Path validation and security checks
-    - Incremental updates based on file modification times
-    - Symbol and centrality indexing coordination
-    """
+    """Service for indexing codebases."""
 
     def __init__(self):
         self._repo_manager = RepoManager()
@@ -77,17 +61,7 @@ class IndexerService:
 
     @staticmethod
     def path_to_repo_name(path: str) -> str:
-        """Convert a path to a consistent repository name.
-
-        Normalizes the directory name to lowercase with underscores,
-        removing special characters.
-
-        Args:
-            path: Path to convert
-
-        Returns:
-            Normalized repository name
-        """
+        """Convert a path to a consistent repository name."""
         name = Path(path).resolve().name.lower()
         name = re.sub(r'[-. ]+', '_', name)
         name = re.sub(r'[^a-z0-9_]', '', name).strip('_')
@@ -100,24 +74,18 @@ class IndexerService:
         base = self.path_to_repo_name(resolved_str)
         digest = hashlib.sha1(resolved_str.encode("utf-8")).hexdigest()
 
-        def get_repo_safe(name: str):
-            try:
-                return self._repo_manager.get_repo(name)
-            except Exception:
-                return None
-
         # Check existing registrations
         for name in [base] + [f"{base}_{digest[:n]}" for n in (8, 12, 16, 40)]:
-            existing = get_repo_safe(name)
+            existing = self._get_repo_safe(name)
             if existing and existing.path == resolved_str:
                 return name
 
         # Find available name
-        if get_repo_safe(base) is None:
+        if self._get_repo_safe(base) is None:
             return base
         for n in (8, 12, 16, 40):
             hashed = f"{base}_{digest[:n]}"
-            if get_repo_safe(hashed) is None:
+            if self._get_repo_safe(hashed) is None:
                 return hashed
         return f"{base}_{digest}"
 
@@ -129,56 +97,28 @@ class IndexerService:
             return None
 
     def _validate_path(self, path: str) -> Path:
-        """Validate and sanitize a path for indexing.
-
-        Security considerations:
-        - Resolves to absolute path to prevent relative path attacks
-        - Checks for symlinks (warns but allows them)
-        - Validates that path exists and is a directory
-        - Prevents path traversal attacks through resolution
-
-        Args:
-            path: Path to validate
-
-        Returns:
-            Resolved, validated Path object
-
-        Raises:
-            PathError: If path is invalid or unsafe
-        """
+        """Validate and sanitize a path for indexing."""
         try:
-            # Convert to Path object and resolve to absolute path
-            # This handles relative paths, '.', '..', symlinks
             resolved = Path(path).resolve(strict=False)
 
-            # Check if path exists
             if not resolved.exists():
                 raise PathError(f"Path does not exist: {resolved}")
-
-            # Check if it's a directory
             if not resolved.is_dir():
                 raise PathError(f"Path is not a directory: {resolved}")
 
-            # Warn if path is a symlink (but allow it)
-            original_path = Path(path)
-            if original_path.is_symlink():
+            if Path(path).is_symlink():
                 logger.warning(f"Path is a symlink: {path} -> {resolved}")
 
-            # Additional security check: ensure the resolved path is accessible
-            # Try to list the directory to verify read permissions
+            # Verify read permissions
             try:
                 next(resolved.iterdir(), None)
             except PermissionError as e:
                 raise PathError(f"Insufficient permissions to read directory: {resolved}") from e
-            except StopIteration:
-                # Empty directory is fine
-                pass
 
             logger.debug(f"Validated path: {path} -> {resolved}")
             return resolved
 
         except (OSError, RuntimeError) as e:
-            # Catch various filesystem errors
             raise PathError(f"Invalid or unsafe path: {e}") from e
 
     def _get_stats(self, repo_name: str) -> tuple[int, int]:
@@ -190,34 +130,28 @@ class IndexerService:
         except Exception as e:
             logger.warning(f"Centrality computation failed for {repo_name}: {e}")
 
-    def _iter_relevant_files(self, repo_path: str):
-        """Yield (full_path, relative_path_str) for index-relevant files.
-        
-        Respects the root .gitignore file in the repository for filtering.
-        Note: Nested .gitignore files are not currently supported.
-        """
-        repo_path_obj = Path(repo_path)
-        included_ext = {ext.lower() for ext in settings.included_extensions}
-        
-        # Build ignore spec from .gitignore + default patterns
-        ignore_patterns = list(settings.excluded_patterns)
-        gitignore_path = repo_path_obj / ".gitignore"
+    def _build_ignore_spec(self, repo_path: Path) -> GitIgnoreSpec:
+        """Build gitignore spec from .gitignore and default patterns."""
+        patterns = list(settings.excluded_patterns)
+        gitignore_path = repo_path / ".gitignore"
         if gitignore_path.exists():
             try:
-                ignore_patterns.extend(gitignore_path.read_text().splitlines())
+                patterns.extend(gitignore_path.read_text().splitlines())
             except (OSError, UnicodeDecodeError) as e:
                 logger.debug(f"Could not read .gitignore: {e}")
-        
-        ignore_spec = GitIgnoreSpec.from_lines(ignore_patterns)
+        return GitIgnoreSpec.from_lines(patterns)
+
+    def _iter_relevant_files(self, repo_path: str):
+        """Yield (full_path, relative_path_str) for index-relevant files."""
+        repo_path_obj = Path(repo_path)
+        included_ext = {ext.lower() for ext in settings.included_extensions}
+        ignore_spec = self._build_ignore_spec(repo_path_obj)
 
         for root, dirnames, filenames in os.walk(repo_path, topdown=True):
             rel_root = Path(root).relative_to(repo_path_obj)
             
-            # Filter directories in-place using gitignore spec
-            dirnames[:] = [
-                d for d in dirnames 
-                if not ignore_spec.match_file(str(rel_root / d) + "/")
-            ]
+            # Filter directories in-place
+            dirnames[:] = [d for d in dirnames if not ignore_spec.match_file(str(rel_root / d) + "/")]
 
             for filename in filenames:
                 if os.path.splitext(filename)[1].lower() not in included_ext:
@@ -229,11 +163,8 @@ class IndexerService:
                 except ValueError:
                     continue
 
-                # Check if file matches ignore patterns
-                if ignore_spec.match_file(str(relative)):
-                    continue
-                    
-                yield full_path, str(relative)
+                if not ignore_spec.match_file(str(relative)):
+                    yield full_path, str(relative)
 
     def _has_files_changed(self, repo_name: str, repo_path: str) -> bool:
         """Check if any indexed files have changed since last indexing."""
@@ -249,15 +180,10 @@ class IndexerService:
         if cached and cached[0] == last_ts and (now - cached[1]) < 5.0:
             return cached[2]
 
-        changed = False
-        for full_path, _ in self._iter_relevant_files(repo_path):
-            try:
-                if full_path.stat().st_mtime > last_ts:
-                    changed = True
-                    break
-            except OSError:
-                changed = True
-                break
+        changed = any(
+            self._file_modified_since(full_path, last_ts)
+            for full_path, _ in self._iter_relevant_files(repo_path)
+        )
 
         self._change_check_cache[repo_name] = (last_ts, now, changed)
         return changed
@@ -315,7 +241,10 @@ class IndexerService:
         if repo and repo.status == "ready" and repo.path == repo_path:
             if self._has_files_changed(repo_name, repo_path):
                 return self._incremental_update(repo_name, repo_path)
-            return IndexResult(repo_name=repo_name, status="unchanged", file_count=repo.file_count, chunk_count=repo.chunk_count)
+            return IndexResult(
+                repo_name=repo_name, status="unchanged",
+                file_count=repo.file_count, chunk_count=repo.chunk_count
+            )
 
         if repo and repo.path != repo_path:
             logger.info(f"Path changed for {repo_name}, re-indexing")
@@ -379,8 +308,11 @@ class IndexerService:
         except Exception as e:
             logger.warning(f"Incremental update failed for {repo_name}: {e}")
             file_count, chunk_count = self._get_stats(repo_name)
-            return IndexResult(repo_name=repo_name, status="unchanged", file_count=file_count, chunk_count=chunk_count,
-                             message=f"Using existing index (update failed: {e})")
+            return IndexResult(
+                repo_name=repo_name, status="unchanged",
+                file_count=file_count, chunk_count=chunk_count,
+                message=f"Using existing index (update failed: {e})"
+            )
 
     def _update_symbols_for_files(self, repo_name: str, repo_path: str, modified_files: list[str]) -> None:
         """Update symbol index for modified files."""

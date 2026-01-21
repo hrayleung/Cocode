@@ -11,11 +11,11 @@ reranked using Cohere's reranker for improved relevance.
 
 import logging
 import threading
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable
 
+from cocode_rust import jaccard_similarity
 from config.settings import settings
 from src.embeddings import get_provider, OpenAIProvider
 from src.exceptions import SearchError
@@ -32,10 +32,20 @@ logger = logging.getLogger(__name__)
 
 _SEARCH_EXECUTOR: ThreadPoolExecutor | None = None
 _SEARCH_EXECUTOR_LOCK = threading.Lock()
-
-# Parallel backends are I/O-heavy (DB + embedding HTTP). Keep the pool modest to
-# avoid excess memory/thread overhead while still allowing concurrent queries.
 _SEARCH_EXECUTOR_MAX_WORKERS = 8
+
+# Query classification patterns
+_SEMANTIC_KEYWORDS = frozenset({
+    "how", "what", "where", "why", "when", "which", "explain",
+    "find", "show", "get", "list", "search", "look",
+    "implement", "handle", "process", "manage", "work",
+})
+
+_CODE_PATTERNS = (
+    "def ", "class ", "function ", "import ", "from ",
+    "async ", "await ", "return ", "const ", "let ", "var ",
+    "fn ", "pub ", "struct ", "impl ", "trait ",
+)
 
 
 def _get_search_executor() -> ThreadPoolExecutor:
@@ -51,21 +61,8 @@ def _get_search_executor() -> ThreadPoolExecutor:
     return _SEARCH_EXECUTOR
 
 
-def apply_centrality_boost(
-    results: list[SearchResult],
-    repo_name: str,
-    weight: float = 1.0,
-) -> None:
-    """Apply centrality-based boosting to search results in-place.
-
-    Files that are imported by many others (structurally central) get
-    higher scores. Peripheral files (tests, scripts) get lower scores.
-
-    Args:
-        results: Search results to modify (in-place)
-        repo_name: Repository name for centrality lookup
-        weight: Boost strength (0=disabled, 1=full effect)
-    """
+def apply_centrality_boost(results: list[SearchResult], repo_name: str, weight: float = 1.0) -> None:
+    """Apply centrality-based boosting to search results in-place."""
     if not results or weight == 0:
         return
 
@@ -77,30 +74,142 @@ def apply_centrality_boost(
         result.score *= 1.0 + (centrality - 1.0) * weight
 
 
-def get_query_embedding(query: str) -> list[float]:
-    """Get embedding for a search query using the configured provider.
-
-    Args:
-        query: Search query text
-
-    Returns:
-        Embedding vector for the query
-    """
+def get_query_embedding(query: str, use_cache: bool = True) -> list[float]:
+    """Get embedding for a search query using the configured provider."""
     from src.embeddings.openai import get_embedding as get_embedding_openai
+    from src.retrieval.embedding_cache import get_embedding_cache
+
+    if use_cache:
+        cache = get_embedding_cache()
+        cached = cache.get(query)
+        if cached is not None:
+            logger.debug(f"Embedding cache hit for query: {query[:50]}...")
+            return cached
 
     provider = get_provider()
-    if isinstance(provider, OpenAIProvider):
-        return get_embedding_openai(query, add_query_context=True)
-    return provider.get_embedding(query)
+    embedding = (
+        get_embedding_openai(query, add_query_context=True)
+        if isinstance(provider, OpenAIProvider)
+        else provider.get_embedding(query)
+    )
+
+    if use_cache:
+        cache.set(query, embedding)
+        logger.debug(f"Cached embedding for query: {query[:50]}...")
+
+    return embedding
+
+
+def classify_query(query: str) -> dict[str, float]:
+    """Classify query intent and return weight adjustments.
+    
+    Returns dict with 'vector_boost', 'bm25_boost', and 'intent'.
+    """
+    query_lower = query.lower().strip()
+    words = query.split()
+    
+    result = {"vector_boost": 1.0, "bm25_boost": 1.0, "intent": "hybrid"}
+    
+    exact_score = _compute_exact_score(query, query_lower, words)
+    semantic_score = _compute_semantic_score(words)
+    
+    if exact_score > semantic_score + 1:
+        result.update(intent="exact", bm25_boost=1.5, vector_boost=0.7)
+    elif semantic_score > exact_score + 1:
+        result.update(intent="semantic", vector_boost=1.5, bm25_boost=0.7)
+    
+    return result
+
+
+def _compute_exact_score(query: str, query_lower: str, words: list[str]) -> int:
+    """Compute score for exact/keyword matching intent."""
+    score = 0
+    
+    # Quoted strings
+    if '"' in query or "'" in query:
+        score += 2
+    
+    # CamelCase identifiers
+    for word in words:
+        if len(word) > 2 and any(c.isupper() for c in word[1:]) and any(c.islower() for c in word):
+            score += 1
+    
+    # snake_case identifiers (strong signal)
+    for word in words:
+        if '_' in word and len(word) > 3:
+            score += 2
+    
+    # File paths or extensions
+    last_word = words[-1] if words else ""
+    if '/' in query or '.' in last_word:
+        score += 1
+    
+    # Code patterns
+    if any(p in query_lower for p in _CODE_PATTERNS):
+        score += 2
+    
+    return score
+
+
+def _compute_semantic_score(words: list[str]) -> int:
+    """Compute score for semantic/natural language intent."""
+    score = 0
+    
+    # Question words at start
+    if words and words[0].lower() in _SEMANTIC_KEYWORDS:
+        score += 2
+    
+    # Natural language phrases
+    if len(words) >= 4:
+        score += 1
+    
+    # Semantic keywords anywhere
+    if any(w.lower() in _SEMANTIC_KEYWORDS for w in words):
+        score += 1
+    
+    return score
 
 
 def _normalize_rrf_weights(weights: list[float] | None, n: int) -> list[float]:
     if weights is None:
         return [1.0] * n
     total = sum(weights)
-    if total > 0:
-        return [w / total for w in weights]
-    return [1.0 / n] * n
+    return [w / total for w in weights] if total > 0 else [1.0 / n] * n
+
+
+def _content_overlap(content1: str, content2: str) -> float:
+    """Calculate content overlap ratio using token Jaccard similarity (Rust)."""
+    return jaccard_similarity(content1.lower(), content2.lower())
+
+
+def _apply_diversity_filter(results: list[SearchResult], target_count: int) -> list[SearchResult]:
+    """Apply MMR-style diversity filtering to reduce semantic clustering."""
+    if len(results) <= target_count:
+        return results
+    
+    selected: list[SearchResult] = []
+    remaining = list(results)
+    
+    if remaining:
+        selected.append(remaining.pop(0))
+    
+    while len(selected) < target_count and remaining:
+        best_idx, best_score = 0, -1.0
+        
+        for i, candidate in enumerate(remaining):
+            max_overlap = max(
+                (_content_overlap(candidate.content, sel.content) for sel in selected),
+                default=0.0
+            )
+            # MMR: lambda=0.7 for relevance, 0.3 for diversity
+            mmr_score = 0.7 * candidate.score + 0.3 * (1.0 - max_overlap)
+            
+            if mmr_score > best_score:
+                best_score, best_idx = mmr_score, i
+        
+        selected.append(remaining.pop(best_idx))
+    
+    return selected
 
 
 def reciprocal_rank_fusion(
@@ -108,12 +217,7 @@ def reciprocal_rank_fusion(
     k: int = 40,
     weights: list[float] | None = None,
 ) -> list[SearchResult]:
-    """Combine multiple result lists using Reciprocal Rank Fusion (RRF).
-
-    This is result-level RRF: it fuses identical *results* (filename+location+content).
-    Use `reciprocal_rank_fusion_by_key` when you want to fuse by a higher-level key
-    such as filename (file-level evidence aggregation).
-    """
+    """Combine multiple result lists using Reciprocal Rank Fusion (RRF)."""
     if not result_lists:
         return []
 
@@ -126,7 +230,7 @@ def reciprocal_rank_fusion(
 
     for results in result_lists:
         rust_list = []
-        for rank, result in enumerate(results):
+        for result in results:
             key = f"{result.filename}:{result.location}:{hash(result.content.strip())}"
             rust_list.append((key, result.score))
             if key not in key_to_result or result.score > key_to_result[key].score:
@@ -153,12 +257,7 @@ def reciprocal_rank_fusion_by_key(
     k: int = 40,
     weights: list[float] | None = None,
 ) -> list[SearchResult]:
-    """RRF that fuses by an arbitrary key (e.g., filename for file-level ranking).
-
-    This is useful when different backends surface different *spans* from the same file.
-    Fusing by filename rewards cross-signal agreement, which tends to improve "key file"
-    selection compared to max-chunk scoring.
-    """
+    """RRF that fuses by an arbitrary key (e.g., filename for file-level ranking)."""
     if not result_lists:
         return []
 
@@ -203,29 +302,20 @@ def reciprocal_rank_fusion_by_key(
 @dataclass
 class SearchOutcome:
     """Result of a search backend execution."""
-
     results: list[SearchResult] = field(default_factory=list)
     failed: bool = False
-    attempted: bool = True
 
 
 class _EmbeddingCache:
-    """Thread-safe lazy cache for query embedding.
-
-    Ensures the embedding is computed only once, even when multiple
-    search backends request it concurrently.
-    """
+    """Thread-safe lazy cache for query embedding."""
 
     def __init__(self, query: str, initial_embedding: list[float] | None = None):
         self._query = query
-        self._embedding: list[float] | None = (
-            initial_embedding if initial_embedding else None
-        )
+        self._embedding = initial_embedding
         self._error: Exception | None = None
         self._lock = threading.Lock()
 
     def get(self) -> list[float]:
-        """Get the embedding, computing it on first access."""
         if self._error:
             raise self._error
         if self._embedding is not None:
@@ -243,43 +333,32 @@ class _EmbeddingCache:
             return self._embedding
 
 
-def _execute_search(
-    search_fn: Callable[[], list[SearchResult]],
-    name: str,
-) -> SearchOutcome:
-    """Execute a search function with error handling.
-
-    Args:
-        search_fn: Search function to execute
-        name: Name for logging purposes
-
-    Returns:
-        SearchOutcome with results or failure status
-    """
-    try:
-        return SearchOutcome(results=search_fn())
-    except Exception as e:
-        logger.warning(f"{name} search failed: {e}")
-        return SearchOutcome(failed=True)
-
-
 def _run_searches_parallel(
     searches: list[tuple[str, Callable[[], list[SearchResult]]]],
 ) -> dict[str, SearchOutcome]:
-    """Run searches in parallel and return outcomes by name.
-
-    Args:
-        searches: List of (name, search_function) tuples
-
-    Returns:
-        Dictionary mapping search names to outcomes
-    """
+    """Run searches in parallel and return outcomes by name."""
     outcomes = {}
     executor = _get_search_executor()
     futures = {name: executor.submit(fn) for name, fn in searches}
+    
     for name, future in futures.items():
         try:
             outcomes[name] = SearchOutcome(results=future.result(timeout=30))
+        except Exception as e:
+            logger.warning(f"{name} search failed: {e}")
+            outcomes[name] = SearchOutcome(failed=True)
+    
+    return outcomes
+
+
+def _run_searches_sequential(
+    searches: list[tuple[str, Callable[[], list[SearchResult]]]],
+) -> dict[str, SearchOutcome]:
+    """Run searches sequentially and return outcomes by name."""
+    outcomes = {}
+    for name, fn in searches:
+        try:
+            outcomes[name] = SearchOutcome(results=fn())
         except Exception as e:
             logger.warning(f"{name} search failed: {e}")
             outcomes[name] = SearchOutcome(failed=True)
@@ -307,24 +386,6 @@ def hybrid_search(
     3. Apply centrality boosting (important files rank higher)
     4. Apply category boosting (implementation > test)
     5. Optionally rerank with Cohere
-
-    Args:
-        repo_name: Repository to search
-        query: Search query
-        top_k: Number of results to return
-        use_reranker: Whether to use Cohere reranking
-        rerank_candidates: Number of candidates for reranking
-        vector_weight: Weight for vector search (default from settings)
-        bm25_weight: Weight for BM25 search (default from settings)
-        symbol_weight: Weight for symbol search (default from settings)
-        parallel: Whether to run searches in parallel
-        include_symbols: Whether to include symbol search
-
-    Returns:
-        List of SearchResult sorted by relevance
-
-    Raises:
-        SearchError: If all search backends fail
     """
     rerank_count = rerank_candidates or settings.rerank_candidates
     vec_w = vector_weight if vector_weight is not None else settings.vector_weight
@@ -335,26 +396,18 @@ def hybrid_search(
     bm25_config = BM25Config(k1=settings.bm25_k1, b=settings.bm25_b)
     include_sym = include_symbols and settings.enable_symbol_indexing
 
-    def run_vector():
-        return vector_search(repo_name, query, top_k=rerank_count, query_embedding=embedding_cache.get())
-
-    def run_bm25():
-        return bm25_search(repo_name, query, top_k=rerank_count, config=bm25_config)
-
-    def run_symbol():
-        return symbol_hybrid_search(repo_name, query, top_k=rerank_count, query_embedding=embedding_cache.get())
+    # Define search functions
+    searches = [
+        ("vector", lambda: vector_search(repo_name, query, top_k=rerank_count, query_embedding=embedding_cache.get())),
+        ("bm25", lambda: bm25_search(repo_name, query, top_k=rerank_count, config=bm25_config)),
+    ]
+    if include_sym:
+        searches.append(("symbol", lambda: symbol_hybrid_search(repo_name, query, top_k=rerank_count, query_embedding=embedding_cache.get())))
 
     # Execute searches
-    searches = [("vector", run_vector), ("bm25", run_bm25)]
-    if include_sym:
-        searches.append(("symbol", run_symbol))
+    outcomes = _run_searches_parallel(searches) if parallel else _run_searches_sequential(searches)
 
-    if parallel:
-        outcomes = _run_searches_parallel(searches)
-    else:
-        outcomes = {name: _execute_search(fn, name.capitalize()) for name, fn in searches}
-
-    if all(outcomes[name].failed for name in outcomes):
+    if all(o.failed for o in outcomes.values()):
         raise SearchError("All search backends failed")
 
     for name, outcome in outcomes.items():
@@ -363,33 +416,29 @@ def hybrid_search(
 
     logger.info("Search results: " + ", ".join(f"{k}={len(v.results)}" for k, v in outcomes.items()))
 
-    # Fuse results using RRF (file-level fusion so different spans from the same
-    # file reinforce each other across backends).
+    # Fuse results
     result_lists = [outcomes["vector"].results, outcomes["bm25"].results]
     weights = [vec_w, bm25_w]
     if include_sym and outcomes.get("symbol") and outcomes["symbol"].results:
         result_lists.append(outcomes["symbol"].results)
         weights.append(sym_w)
 
-    candidates = reciprocal_rank_fusion_by_key(
-        result_lists,
-        key_fn=lambda r: r.filename,
-        weights=weights,
-    )[:rerank_count]
+    candidates = reciprocal_rank_fusion(result_lists, weights=weights)[:rerank_count]
 
-    # Apply boosting (used for both candidate selection and final ordering)
+    # Apply diversity filter
+    if len(candidates) > top_k:
+        candidates = _apply_diversity_filter(candidates, target_count=top_k * 2)
+
+    # Apply boosting
     if settings.centrality_weight > 0:
         apply_centrality_boost(candidates, repo_name, settings.centrality_weight)
-
     apply_category_boosting(candidates, sort=True)
 
-    # Optional reranking with Cohere
+    # Optional reranking
     if use_reranker and settings.cohere_api_key and candidates:
         logger.debug(f"Reranking {min(len(candidates), top_k * 2)} candidates with Cohere")
         reranked = rerank_results(query, candidates[:top_k * 2], top_n=top_k)
 
-        # Reranking replaces scores, so re-apply boosts to keep implementation
-        # preference and structural importance.
         if settings.centrality_weight > 0:
             apply_centrality_boost(reranked, repo_name, settings.centrality_weight)
         apply_category_boosting(reranked, sort=True)

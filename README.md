@@ -103,6 +103,7 @@ USE_LATE_CHUNKING=true
 
 # Optional: Cohere reranking
 COHERE_API_KEY=...
+ENABLE_RERANKER=true  # enabled by default when COHERE_API_KEY is set
 ```
 
 ## MCP Configuration
