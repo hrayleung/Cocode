@@ -9,6 +9,7 @@ using Tree-sitter for accurate AST parsing. Extracted symbols include:
 """
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -179,7 +180,6 @@ def extract_go_symbols(tree_root: Node, source_bytes: bytes, filename: str) -> l
                 parent_type = None
 
                 if receiver_node:
-                    import re
                     receiver_text = source_bytes[receiver_node.start_byte:receiver_node.end_byte].decode("utf-8")
                     match = re.search(r'\*?(\w+)\s*\)', receiver_text)
                     if match:

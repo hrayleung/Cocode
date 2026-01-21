@@ -451,6 +451,7 @@ psql -d cocode -c "SELECT * FROM pg_extension WHERE extname = 'vector';"
 | Tool | Description |
 |------|-------------|
 | `codebase_retrieval(query, path, top_k)` | Semantic search with automatic indexing. Returns relevant code snippets. |
+| `codebase_retrieval_full(query, path, top_k, max_symbols, max_symbols_per_file, max_code_chars, include_dependencies)` | Returns key files + import dependencies + full implementations of relevant symbols (functions/classes/methods). |
 | `clear_index(path)` | Delete index to force re-indexing on next search. |
 
 ### Result Format
@@ -459,6 +460,11 @@ psql -d cocode -c "SELECT * FROM pg_extension WHERE extname = 'vector';"
 - Top results include `content` + `locations`
 - Lower-ranked results include `reference` + `lines` (a compact signature/preview)
 - Some queries may include extra `"reference": "[Related via imports]"` entries from graph expansion
+
+`codebase_retrieval_full` returns an object:
+- `files`: ranked key files (with category + line hints)
+- `dependencies`: import edges between returned files
+- `symbols`: full code implementations for the most relevant functions/classes/methods
 
 ### Example Queries
 
@@ -530,7 +536,7 @@ config/
 └── settings.py              # Environment-driven configuration
 
 src/
-├── server.py                # FastMCP entry point (2 tools)
+├── server.py                # FastMCP entry point (3 tools)
 │
 ├── indexer/                 # CocoIndex Integration
 │   ├── service.py           # IndexerService singleton - orchestrates indexing

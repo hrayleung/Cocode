@@ -5,13 +5,17 @@ expand search results with contextually related files.
 """
 
 import logging
+import json
 import re
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 
+from psycopg import sql
+
 from src.storage.postgres import get_connection
 from src.parser.ast_parser import extract_imports_ast, get_language_from_file
+from src.storage.schema import sanitize_repo_name
 
 logger = logging.getLogger(__name__)
 
@@ -174,10 +178,9 @@ def get_repo_files(repo_name: str) -> set[str]:
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(f"""
-                SELECT DISTINCT filename
-                FROM {table_name}
-            """)
+            cur.execute(
+                sql.SQL("SELECT DISTINCT filename FROM {}").format(sql.Identifier(table_name))
+            )
             return {row[0] for row in cur.fetchall()}
 
 
@@ -211,20 +214,18 @@ def build_import_graph(repo_name: str, use_cache: bool = True) -> dict[str, list
         with conn.cursor(name="graph_expansion_cursor") as cur:
             cur.itersize = 100
             # First pass: collect all filenames
-            cur.execute(f"""
-                SELECT DISTINCT filename
-                FROM {table_name}
-            """)
+            cur.execute(
+                sql.SQL("SELECT DISTINCT filename FROM {}").format(sql.Identifier(table_name))
+            )
             repo_files = {row[0] for row in cur.fetchall()}
 
         # Second pass: extract imports with full repo_files set available
         import_graph: dict[str, list[str]] = {}
         with conn.cursor(name="graph_content_cursor") as cur:
             cur.itersize = 100
-            cur.execute(f"""
-                SELECT filename, content
-                FROM {table_name}
-            """)
+            cur.execute(
+                sql.SQL("SELECT filename, content FROM {}").format(sql.Identifier(table_name))
+            )
 
             # Track which files we've already processed (multiple chunks per file)
             processed_files: dict[str, list[str]] = {}
@@ -274,7 +275,7 @@ def multi_hop_traversal(
     max_hops: int = 3,
     max_results: int = 30,
 ) -> list[tuple[str, str, str, int]]:
-    """Perform multi-hop BFS traversal of the import graph.
+    """Perform multi-hop BFS traversal using Rust (when beneficial).
 
     Args:
         start_files: Initial files to start traversal from
@@ -286,41 +287,224 @@ def multi_hop_traversal(
     Returns:
         List of tuples: (source_file, target_file, relation_type, hop_distance)
     """
+    total_edges = sum(len(targets) for targets in import_graph.values())
+    if total_edges > 100:
+        try:
+            from src.rust_bridge import bfs_expansion as rust_bfs
+
+            edges: list[tuple[str, str]] = []
+            for source, targets in import_graph.items():
+                for target in targets:
+                    edges.append((source, target))
+
+            hop_distances = rust_bfs(edges, start_files, max_hops, max_results, bidirectional=True)
+
+            results = []
+            for target_file, hop_dist in hop_distances.items():
+                if target_file not in start_files and hop_dist > 0:
+                    came_from = None
+                    relation = "imports"
+
+                    # Check direct neighbors first (hop 1)
+                    for start in start_files:
+                        if target_file in import_graph.get(start, []):
+                            came_from = start
+                            relation = "imports"
+                            break
+                        elif target_file in reverse_graph.get(start, []):
+                            came_from = start
+                            relation = "imported_by"
+                            break
+
+                    # For multi-hop: trace back to find nearest start file
+                    if came_from is None and hop_dist > 1:
+                        trace_visited = {target_file}
+                        trace_queue = deque([(target_file, 0)])
+                        while trace_queue and came_from is None:
+                            node, depth = trace_queue.popleft()
+                            if depth >= hop_dist:
+                                continue
+                            # Check reverse edges (who imports this node)
+                            for prev in reverse_graph.get(node, []):
+                                if prev in start_files:
+                                    came_from = prev
+                                    relation = "imports"
+                                    break
+                                if prev not in trace_visited:
+                                    trace_visited.add(prev)
+                                    trace_queue.append((prev, depth + 1))
+                            if came_from:
+                                break
+                            # Check forward edges (who this node imports)
+                            for prev in import_graph.get(node, []):
+                                if prev in start_files:
+                                    came_from = prev
+                                    relation = "imported_by"
+                                    break
+                                if prev not in trace_visited:
+                                    trace_visited.add(prev)
+                                    trace_queue.append((prev, depth + 1))
+
+                    if came_from:
+                        results.append((came_from, target_file, relation, hop_dist))
+
+            return results[:max_results]
+        except Exception as e:
+            logger.debug(f"Rust BFS failed, falling back to Python: {e}")
+
     visited = set(start_files)
     results = []
 
-    # Queue contains tuples: (current_file, hop_distance, came_from, relation_type)
-    # For start files, came_from is None
-    queue = [(file, 0, None, None) for file in start_files]
+    queue: deque[tuple[str, int, str | None, str | None]] = deque(
+        (file, 0, None, None) for file in start_files
+    )
 
     while queue and len(results) < max_results:
-        current_file, distance, came_from, relation = queue.pop(0)
+        current_file, distance, came_from, relation = queue.popleft()
 
-        # Skip if we've exceeded max hops or already visited
         if distance > max_hops:
             continue
 
-        # Add result (skip start files themselves)
         if came_from is not None and distance > 0:
             results.append((came_from, current_file, relation, distance))
 
-        # Don't explore further if we've hit max hops
         if distance >= max_hops:
             continue
 
-        # Explore files this file imports (forward edges)
         for imported_file in import_graph.get(current_file, []):
             if imported_file not in visited:
                 visited.add(imported_file)
                 queue.append((imported_file, distance + 1, current_file, "imports"))
 
-        # Explore files that import this file (reverse edges)
         for importer_file in reverse_graph.get(current_file, []):
             if importer_file not in visited:
                 visited.add(importer_file)
                 queue.append((importer_file, distance + 1, current_file, "imported_by"))
 
     return results[:max_results]
+
+
+def _get_related_files_from_graph_cache(
+    repo_name: str,
+    filenames: list[str],
+    *,
+    max_related: int,
+    max_hops: int,
+) -> list[FileRelation] | None:
+    """Fetch related files via the per-repo graph_cache table.
+
+    Returns None when the cache table isn't available or inputs are invalid,
+    so callers can fall back to rebuilding the graph from indexed chunks.
+    """
+    if not filenames or max_related <= 0 or max_hops <= 0:
+        return None
+
+    schema_name = sanitize_repo_name(repo_name)
+    cache_table = sql.Identifier(schema_name, "graph_cache")
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables
+                        WHERE table_schema = %s AND table_name = 'graph_cache'
+                    )
+                    """,
+                    (schema_name,),
+                )
+                if not cur.fetchone()[0]:
+                    return None
+
+                visited = set(filenames)
+                frontier = list(filenames)
+                relations: list[FileRelation] = []
+
+                for distance in range(max_hops):
+                    if not frontier or len(relations) >= max_related:
+                        break
+
+                    cur.execute(
+                        sql.SQL(
+                            """
+                            SELECT filename, imports, imported_by
+                            FROM {table}
+                            WHERE filename = ANY(%s)
+                            """
+                        ).format(table=cache_table),
+                        (frontier,),
+                    )
+                    rows = cur.fetchall()
+
+                    neighbors: dict[str, tuple[list[str], list[str]]] = {}
+                    for filename, imports, imported_by in rows:
+                        if isinstance(imports, str):
+                            try:
+                                imports = json.loads(imports)
+                            except Exception:
+                                imports = []
+                        if isinstance(imported_by, str):
+                            try:
+                                imported_by = json.loads(imported_by)
+                            except Exception:
+                                imported_by = []
+
+                        imp_list = imports if isinstance(imports, list) else []
+                        by_list = imported_by if isinstance(imported_by, list) else []
+                        neighbors[filename] = (imp_list, by_list)
+
+                    next_frontier: list[str] = []
+                    hop_distance = distance + 1
+
+                    for source_file in frontier:
+                        imports, imported_by = neighbors.get(source_file, ([], []))
+
+                        for target_file in imports:
+                            if target_file == source_file or target_file in visited:
+                                continue
+                            visited.add(target_file)
+                            relations.append(
+                                FileRelation(
+                                    source_file=source_file,
+                                    target_file=target_file,
+                                    relation_type="imports",
+                                    hop_distance=hop_distance,
+                                )
+                            )
+                            if len(relations) >= max_related:
+                                break
+                            next_frontier.append(target_file)
+
+                        if len(relations) >= max_related:
+                            break
+
+                        for target_file in imported_by:
+                            if target_file == source_file or target_file in visited:
+                                continue
+                            visited.add(target_file)
+                            relations.append(
+                                FileRelation(
+                                    source_file=source_file,
+                                    target_file=target_file,
+                                    relation_type="imported_by",
+                                    hop_distance=hop_distance,
+                                )
+                            )
+                            if len(relations) >= max_related:
+                                break
+                            next_frontier.append(target_file)
+
+                        if len(relations) >= max_related:
+                            break
+
+                    frontier = next_frontier
+
+                return relations[:max_related]
+
+    except Exception as e:
+        logger.debug(f"Graph cache traversal failed for {repo_name}: {e}")
+        return None
 
 
 def get_related_files(
@@ -347,6 +531,15 @@ def get_related_files(
         max_hops = settings.max_graph_hops
     if max_related is None:
         max_related = settings.max_graph_results
+
+    cached = _get_related_files_from_graph_cache(
+        repo_name,
+        filenames,
+        max_related=max_related,
+        max_hops=max_hops,
+    )
+    if cached is not None:
+        return cached
 
     try:
         import_graph = build_import_graph(repo_name)

@@ -16,6 +16,7 @@ from src.retrieval.graph_expansion import expand_results_with_related
 logger = logging.getLogger(__name__)
 
 MIN_SCORE_RATIO = 0.4
+
 FULL_CODE_COUNT = 3
 MAX_CHUNKS_PER_FILE = 3
 
@@ -177,7 +178,7 @@ class SearchService:
                 repo_name=repo_name,
                 query=query.strip(),
                 top_k=top_k * 3,
-                use_reranker=bool(settings.cohere_api_key),
+                use_reranker=bool(settings.cohere_api_key) and bool(settings.enable_reranker),
             )
             if not results:
                 return []

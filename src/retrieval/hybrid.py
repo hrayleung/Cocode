@@ -30,6 +30,26 @@ from .vector_search import vector_search
 
 logger = logging.getLogger(__name__)
 
+_SEARCH_EXECUTOR: ThreadPoolExecutor | None = None
+_SEARCH_EXECUTOR_LOCK = threading.Lock()
+
+# Parallel backends are I/O-heavy (DB + embedding HTTP). Keep the pool modest to
+# avoid excess memory/thread overhead while still allowing concurrent queries.
+_SEARCH_EXECUTOR_MAX_WORKERS = 8
+
+
+def _get_search_executor() -> ThreadPoolExecutor:
+    global _SEARCH_EXECUTOR
+    if _SEARCH_EXECUTOR is not None:
+        return _SEARCH_EXECUTOR
+    with _SEARCH_EXECUTOR_LOCK:
+        if _SEARCH_EXECUTOR is None:
+            _SEARCH_EXECUTOR = ThreadPoolExecutor(
+                max_workers=_SEARCH_EXECUTOR_MAX_WORKERS,
+                thread_name_prefix="cocode-search",
+            )
+    return _SEARCH_EXECUTOR
+
 
 def apply_centrality_boost(
     results: list[SearchResult],
@@ -74,6 +94,15 @@ def get_query_embedding(query: str) -> list[float]:
     return provider.get_embedding(query)
 
 
+def _normalize_rrf_weights(weights: list[float] | None, n: int) -> list[float]:
+    if weights is None:
+        return [1.0] * n
+    total = sum(weights)
+    if total > 0:
+        return [w / total for w in weights]
+    return [1.0 / n] * n
+
+
 def reciprocal_rank_fusion(
     result_lists: list[list[SearchResult]],
     k: int = 40,
@@ -81,55 +110,93 @@ def reciprocal_rank_fusion(
 ) -> list[SearchResult]:
     """Combine multiple result lists using Reciprocal Rank Fusion (RRF).
 
-    RRF combines rankings from multiple sources by summing the reciprocal
-    of each result's rank: score = sum(weight / (k + rank + 1))
-
-    This approach is robust to score calibration differences between
-    different ranking systems.
-
-    Args:
-        result_lists: List of result lists from different search methods
-        k: Smoothing parameter (default 40, higher = more uniform weights)
-        weights: Optional weights for each result list (normalized internally)
-
-    Returns:
-        Combined and sorted list of SearchResults
+    This is result-level RRF: it fuses identical *results* (filename+location+content).
+    Use `reciprocal_rank_fusion_by_key` when you want to fuse by a higher-level key
+    such as filename (file-level evidence aggregation).
     """
     if not result_lists:
         return []
 
-    # Normalize weights
-    if weights is None:
-        weights = [1.0] * len(result_lists)
-    else:
-        total = sum(weights)
-        if total > 0:
-            weights = [w / total for w in weights]
-        else:
-            weights = [1.0 / len(result_lists)] * len(result_lists)
+    weights = _normalize_rrf_weights(weights, len(result_lists))
 
-    # Accumulate RRF scores
-    scores: dict[str, float] = defaultdict(float)
-    results_map: dict[str, SearchResult] = {}
+    from src.rust_bridge import reciprocal_rank_fusion_weighted as rust_rrf
 
-    for weight, results in zip(weights, result_lists, strict=True):
+    rust_input = []
+    key_to_result: dict[str, SearchResult] = {}
+
+    for results in result_lists:
+        rust_list = []
         for rank, result in enumerate(results):
             key = f"{result.filename}:{result.location}:{hash(result.content.strip())}"
-            scores[key] += weight / (k + rank + 1)
+            rust_list.append((key, result.score))
+            if key not in key_to_result or result.score > key_to_result[key].score:
+                key_to_result[key] = result
+        rust_input.append(rust_list)
 
-            # Keep the highest-scored version of each result
-            if key not in results_map or result.score > results_map[key].score:
-                results_map[key] = result
+    fused_scores = rust_rrf(rust_input, weights, k=float(k))
 
-    # Create final results sorted by RRF score
     return [
         SearchResult(
-            filename=results_map[key].filename,
-            location=results_map[key].location,
-            content=results_map[key].content,
-            score=scores[key],
+            filename=key_to_result[key].filename,
+            location=key_to_result[key].location,
+            content=key_to_result[key].content,
+            score=score,
         )
-        for key in sorted(scores, key=scores.get, reverse=True)
+        for key, score in fused_scores
+    ]
+
+
+def reciprocal_rank_fusion_by_key(
+    result_lists: list[list[SearchResult]],
+    *,
+    key_fn: Callable[[SearchResult], str],
+    k: int = 40,
+    weights: list[float] | None = None,
+) -> list[SearchResult]:
+    """RRF that fuses by an arbitrary key (e.g., filename for file-level ranking).
+
+    This is useful when different backends surface different *spans* from the same file.
+    Fusing by filename rewards cross-signal agreement, which tends to improve "key file"
+    selection compared to max-chunk scoring.
+    """
+    if not result_lists:
+        return []
+
+    weights = _normalize_rrf_weights(weights, len(result_lists))
+
+    from src.rust_bridge import reciprocal_rank_fusion_weighted as rust_rrf
+
+    best_rep: dict[str, SearchResult] = {}
+    best_rank: dict[str, int] = {}
+    best_weight: dict[str, float] = {}
+
+    rust_input = []
+    for weight, results in zip(weights, result_lists, strict=True):
+        rust_list = []
+        for rank, result in enumerate(results):
+            key = key_fn(result)
+            rust_list.append((key, result.score))
+
+            if (
+                key not in best_rep
+                or rank < best_rank[key]
+                or (rank == best_rank[key] and weight > best_weight[key])
+            ):
+                best_rep[key] = result
+                best_rank[key] = rank
+                best_weight[key] = weight
+        rust_input.append(rust_list)
+
+    fused_scores = rust_rrf(rust_input, weights, k=float(k))
+
+    return [
+        SearchResult(
+            filename=best_rep[key].filename,
+            location=best_rep[key].location,
+            content=best_rep[key].content,
+            score=score,
+        )
+        for key, score in fused_scores
     ]
 
 
@@ -149,9 +216,11 @@ class _EmbeddingCache:
     search backends request it concurrently.
     """
 
-    def __init__(self, query: str):
+    def __init__(self, query: str, initial_embedding: list[float] | None = None):
         self._query = query
-        self._embedding: list[float] | None = None
+        self._embedding: list[float] | None = (
+            initial_embedding if initial_embedding else None
+        )
         self._error: Exception | None = None
         self._lock = threading.Lock()
 
@@ -206,14 +275,14 @@ def _run_searches_parallel(
         Dictionary mapping search names to outcomes
     """
     outcomes = {}
-    with ThreadPoolExecutor(max_workers=len(searches)) as executor:
-        futures = {name: executor.submit(fn) for name, fn in searches}
-        for name, future in futures.items():
-            try:
-                outcomes[name] = SearchOutcome(results=future.result(timeout=30))
-            except Exception as e:
-                logger.warning(f"{name} search failed: {e}")
-                outcomes[name] = SearchOutcome(failed=True)
+    executor = _get_search_executor()
+    futures = {name: executor.submit(fn) for name, fn in searches}
+    for name, future in futures.items():
+        try:
+            outcomes[name] = SearchOutcome(results=future.result(timeout=30))
+        except Exception as e:
+            logger.warning(f"{name} search failed: {e}")
+            outcomes[name] = SearchOutcome(failed=True)
     return outcomes
 
 
@@ -228,6 +297,7 @@ def hybrid_search(
     symbol_weight: float | None = None,
     parallel: bool = True,
     include_symbols: bool = True,
+    query_embedding: list[float] | None = None,
 ) -> list[SearchResult]:
     """Perform hybrid search combining vector, BM25, and symbol searches.
 
@@ -261,7 +331,7 @@ def hybrid_search(
     bm25_w = bm25_weight if bm25_weight is not None else settings.bm25_weight
     sym_w = symbol_weight if symbol_weight is not None else settings.symbol_weight
 
-    embedding_cache = _EmbeddingCache(query)
+    embedding_cache = _EmbeddingCache(query, initial_embedding=query_embedding)
     bm25_config = BM25Config(k1=settings.bm25_k1, b=settings.bm25_b)
     include_sym = include_symbols and settings.enable_symbol_indexing
 
@@ -284,7 +354,6 @@ def hybrid_search(
     else:
         outcomes = {name: _execute_search(fn, name.capitalize()) for name, fn in searches}
 
-    # Check if all backends failed
     if all(outcomes[name].failed for name in outcomes):
         raise SearchError("All search backends failed")
 
@@ -294,16 +363,21 @@ def hybrid_search(
 
     logger.info("Search results: " + ", ".join(f"{k}={len(v.results)}" for k, v in outcomes.items()))
 
-    # Fuse results using RRF
+    # Fuse results using RRF (file-level fusion so different spans from the same
+    # file reinforce each other across backends).
     result_lists = [outcomes["vector"].results, outcomes["bm25"].results]
     weights = [vec_w, bm25_w]
     if include_sym and outcomes.get("symbol") and outcomes["symbol"].results:
         result_lists.append(outcomes["symbol"].results)
         weights.append(sym_w)
 
-    candidates = reciprocal_rank_fusion(result_lists, weights=weights)[:rerank_count]
+    candidates = reciprocal_rank_fusion_by_key(
+        result_lists,
+        key_fn=lambda r: r.filename,
+        weights=weights,
+    )[:rerank_count]
 
-    # Apply boosting (must happen BEFORE reranking)
+    # Apply boosting (used for both candidate selection and final ordering)
     if settings.centrality_weight > 0:
         apply_centrality_boost(candidates, repo_name, settings.centrality_weight)
 
@@ -312,7 +386,15 @@ def hybrid_search(
     # Optional reranking with Cohere
     if use_reranker and settings.cohere_api_key and candidates:
         logger.debug(f"Reranking {min(len(candidates), top_k * 2)} candidates with Cohere")
-        return rerank_results(query, candidates[:top_k * 2], top_n=top_k)
+        reranked = rerank_results(query, candidates[:top_k * 2], top_n=top_k)
+
+        # Reranking replaces scores, so re-apply boosts to keep implementation
+        # preference and structural importance.
+        if settings.centrality_weight > 0:
+            apply_centrality_boost(reranked, repo_name, settings.centrality_weight)
+        apply_category_boosting(reranked, sort=True)
+
+        return reranked[:top_k]
 
     return candidates[:top_k]
 
@@ -369,7 +451,7 @@ def search_with_diagnostics(repo_name: str, query: str, top_k: int = 10) -> dict
         diagnostics, "hybrid_no_rerank"
     )
 
-    if settings.cohere_api_key:
+    if settings.cohere_api_key and settings.enable_reranker:
         _timed_search(
             lambda: hybrid_search(repo_name, query, top_k=top_k, use_reranker=True),
             diagnostics, "hybrid_reranked"

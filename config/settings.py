@@ -67,6 +67,7 @@ class Settings:
     # Cohere (reranking)
     cohere_api_key: str = field(default_factory=lambda: os.getenv("COHERE_API_KEY", ""))
     rerank_model: str = field(default_factory=lambda: os.getenv("RERANK_MODEL", "rerank-v3.5"))
+    enable_reranker: bool = field(default_factory=lambda: os.getenv("ENABLE_RERANKER", "true").lower() == "true")
 
     # Indexing
     chunk_size: int = field(default_factory=lambda: _get_int_env("CHUNK_SIZE", 2000, min_val=100))
@@ -113,8 +114,37 @@ class Settings:
         ".md", ".mdx",
     ])
     excluded_patterns: list[str] = field(default_factory=lambda: [
-        ".*", "__pycache__", "node_modules", "target",
-        "dist", "build", ".git", "venv", ".venv"
+        # Version control
+        ".git/",
+        ".svn/",
+        ".hg/",
+        # Python
+        "__pycache__/",
+        "*.pyc",
+        ".venv/",
+        "venv/",
+        "*.egg-info/",
+        ".eggs/",
+        "site-packages/",
+        ".tox/",
+        ".nox/",
+        ".pytest_cache/",
+        ".mypy_cache/",
+        ".ruff_cache/",
+        # JavaScript/Node
+        "node_modules/",
+        # Build outputs
+        "target/",
+        "dist/",
+        "build/",
+        "out/",
+        # IDE/Editor
+        ".idea/",
+        ".vscode/",
+        "*.swp",
+        # Other
+        ".cache/",
+        "*.log",
     ])
 
 

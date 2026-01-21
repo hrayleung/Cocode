@@ -1,8 +1,6 @@
 """BM25 search using PostgreSQL full-text search with multiple backend support."""
 
 import logging
-import threading
-import time
 from dataclasses import dataclass
 from enum import Enum
 
@@ -12,6 +10,7 @@ from src.exceptions import SearchError
 from src.storage.postgres import get_connection
 
 from .tokenizer import tokenize_for_search
+from .ttl_cache import TTLCache
 from .vector_search import SearchResult, get_chunks_table_name
 
 logger = logging.getLogger(__name__)
@@ -30,8 +29,8 @@ class BM25Config:
 
 
 _available_backend: BM25Backend | None = None
-_fts_ready_cache: dict[str, tuple[bool, float]] = {}
-_fts_ready_lock = threading.Lock()
+_fts_ready_cache = TTLCache(ttl_hit=300.0, ttl_miss=30.0)
+_content_tsv_cache = TTLCache(ttl_hit=300.0, ttl_miss=30.0)
 
 
 def _check_extension(extension: str, installed: bool = True) -> bool:
@@ -127,13 +126,16 @@ def _search_native_fts(table_name: str, tokens: list[str], top_k: int, config: B
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-            # Check for tsvector column
-            cur.execute(
-                "SELECT 1 FROM information_schema.columns WHERE table_name = %s AND column_name = 'content_tsv'",
-                (table_name,)
-            )
-            has_tsv = cur.fetchone() is not None
+            has_tsv = _content_tsv_cache.get(table_name)
+            if has_tsv is None:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.columns WHERE table_name = %s AND column_name = 'content_tsv'",
+                    (table_name,),
+                )
+                has_tsv = cur.fetchone() is not None
+                _content_tsv_cache.set(table_name, has_tsv)
 
+            query_str = " OR ".join(tokens)
             if has_tsv:
                 cur.execute(psycopg_sql.SQL("""
                     WITH query AS (SELECT websearch_to_tsquery('english', %s) AS q)
@@ -142,7 +144,7 @@ def _search_native_fts(table_name: str, tokens: list[str], top_k: int, config: B
                     WHERE content_tsv @@ query.q
                     ORDER BY score DESC
                     LIMIT %s
-                """).format(psycopg_sql.Identifier(table_name)), (" OR ".join(tokens), top_k))
+                """).format(psycopg_sql.Identifier(table_name)), (query_str, top_k))
             else:
                 cur.execute(psycopg_sql.SQL("""
                     WITH query AS (SELECT websearch_to_tsquery('english', %s) AS q)
@@ -151,7 +153,7 @@ def _search_native_fts(table_name: str, tokens: list[str], top_k: int, config: B
                     WHERE to_tsvector('english', content) @@ query.q
                     ORDER BY score DESC
                     LIMIT %s
-                """).format(psycopg_sql.Identifier(table_name)), (" OR ".join(tokens), top_k))
+                """).format(psycopg_sql.Identifier(table_name)), (query_str, top_k))
 
             rows = cur.fetchall()
             if not rows:
@@ -187,13 +189,9 @@ def _search_keyword_fallback(cur, table_name: str, tokens: list[str], top_k: int
 
 def ensure_fts_index(repo_name: str) -> bool:
     """Ensure full-text search index exists for a repository."""
-    now = time.monotonic()
-    with _fts_ready_lock:
-        cached = _fts_ready_cache.get(repo_name)
-        if cached and cached[0] and (now - cached[1]) < 300.0:
-            return True
-        if cached and not cached[0] and (now - cached[1]) < 30.0:
-            return False
+    cached = _fts_ready_cache.get(repo_name)
+    if cached is not None:
+        return cached
 
     try:
         from .fts_setup import setup_fts_for_repo
@@ -202,8 +200,12 @@ def ensure_fts_index(repo_name: str) -> bool:
         logger.warning(f"Could not set up enhanced FTS for {repo_name}: {e}")
         ok = _ensure_basic_fts_index(repo_name)
 
-    with _fts_ready_lock:
-        _fts_ready_cache[repo_name] = (ok, now)
+    _fts_ready_cache.set(repo_name, ok)
+    if ok:
+        try:
+            _content_tsv_cache.set(get_chunks_table_name(repo_name), True)
+        except Exception as e:
+            logger.debug(f"Failed to prime content_tsv cache for {repo_name}: {e}")
     return ok
 
 
@@ -224,13 +226,13 @@ def _ensure_basic_fts_index(repo_name: str) -> bool:
                         GENERATED ALWAYS AS (to_tsvector('english', coalesce(content, ''))) STORED
                     """).format(psycopg_sql.Identifier(table_name)))
 
-                # Create index with sanitized table name
                 index_name = f"idx_{table_name}_content_tsv"
                 cur.execute(psycopg_sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {} USING GIN(content_tsv)").format(
                     psycopg_sql.Identifier(index_name),
                     psycopg_sql.Identifier(table_name)
                 ))
                 conn.commit()
+                _content_tsv_cache.set(table_name, True)
                 return True
     except Exception as e:
         logger.error(f"Failed to create FTS index for {table_name}: {e}")

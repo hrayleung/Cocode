@@ -1,177 +1,146 @@
 """Code-aware tokenization for BM25 search.
 
-Handles code-specific patterns like camelCase, snake_case, SCREAMING_CASE,
-and other programming language conventions.
+Uses Rust for performance when available, falls back to Python.
 """
 
 import re
 
-# Programming language keywords and common terms that should be excluded
+# Try to use Rust tokenizer
+try:
+    from src.rust_bridge.tokenizer import (
+        extract_code_tokens as _rust_extract,
+        tokenize_for_search as _rust_tokenize,
+    )
+    _USE_RUST = True
+except ImportError:
+    _USE_RUST = False
+
+# Python fallback implementation
 CODE_STOP_WORDS: set[str] = {
-    # Common programming keywords
-    "def", "class", "function", "const", "let", "var", "if", "else", "elif",
-    "for", "while", "do", "switch", "case", "break", "continue", "return",
-    "try", "catch", "except", "finally", "throw", "raise", "import", "from",
-    "export", "default", "async", "await", "yield", "lambda", "new", "this",
-    "self", "super", "extends", "implements", "interface", "type", "enum",
-    "struct", "trait", "impl", "pub", "private", "public", "protected",
-    "static", "final", "abstract", "virtual", "override", "const", "mut",
-    "fn", "mod", "use", "crate", "extern", "unsafe", "where", "dyn", "ref",
-    "match", "loop", "in", "not", "and", "or", "is", "as", "with", "pass",
-    "none", "null", "nil", "true", "false", "void", "int", "str", "bool",
-    "float", "double", "char", "byte", "long", "short", "unsigned", "signed",
-    # Common single letters and articles
-    "a", "an", "the", "of", "to", "in", "on", "at", "by", "it", "is", "be",
-    # Common method/variable prefixes that are too generic
-    "get", "set", "has", "can", "should", "will", "did", "was", "are",
+    # Language keywords (control flow)
+    "if", "else", "elif", "then", "endif", "switch", "case", "default",
+    "for", "while", "do", "loop", "break", "continue", "goto", "return",
+    "try", "catch", "except", "finally", "throw", "raise", "throws",
+    "yield", "await", "async",
+    # Declarations
+    "def", "func", "fn", "function", "proc", "sub", "method",
+    "class", "struct", "enum", "interface", "trait", "type", "typedef",
+    "var", "let", "const", "val", "mut", "static", "final", "readonly",
+    "import", "from", "export", "require", "include", "using", "use",
+    "package", "module", "mod", "namespace", "crate", "extern",
+    # OOP keywords
+    "new", "this", "self", "super", "extends", "implements", "override",
+    "public", "private", "protected", "internal", "abstract", "virtual",
+    "sealed", "partial",
+    # Type keywords
+    "void", "null", "nil", "none", "undefined", "true", "false",
+    "int", "integer", "float", "double", "bool", "boolean", "string", "str",
+    "char", "byte", "short", "long", "unsigned", "signed", "size",
+    "object", "any", "dynamic", "auto",
+    # Rust specific
+    "impl", "pub", "where", "dyn", "ref", "box", "move", "unsafe", "match",
+    # Common short identifiers
+    "i", "j", "k", "n", "m", "x", "y", "z", "a", "b", "c", "e", "f", "p", "q", "r", "s", "t", "v", "w",
+    "id", "ok", "err", "io", "os", "fs", "db", "ui", "tx", "rx",
+    # Common generic variable names
+    "tmp", "temp", "arg", "args", "param", "params",
+    "ret", "res", "result", "out", "output", "in", "input",
+    "buf", "buffer", "ptr", "ctx", "cfg", "opt", "opts",
+    "idx", "len", "num", "cnt", "pos", "key",
+    # Common method prefixes
+    "get", "set", "has", "is", "can", "should", "will", "did", "was", "are",
+    "add", "remove", "delete", "update", "create", "init", "load", "save",
+    "read", "write", "open", "close", "start", "stop", "run", "exec",
+    "on", "to", "with", "by", "at", "of", "as", "or", "and", "not",
+    # English articles
+    "an", "the", "be", "it", "its",
+    # Common but meaningless alone
+    "data", "info", "item", "items", "list", "array", "map",
+    "node", "elem", "element", "entry", "record", "row", "col",
+    "src", "dst", "source", "dest", "target", "origin",
+    "old", "prev", "next", "cur", "current", "last", "first",
+    "min", "max", "sum", "avg", "total", "count",
+    "name", "value", "kind", "mode", "state", "status",
+    "msg", "message", "text", "content", "body", "payload",
+    "path", "file", "dir", "url", "uri",
+    "cb", "callback", "handler", "listener", "observer",
 }
 
-# Minimum token length to consider
 MIN_TOKEN_LENGTH = 2
 
 
-def split_camel_case(text: str) -> list[str]:
-    """Split camelCase and PascalCase into separate words.
-
-    Examples:
-        "getUserName" -> ["get", "User", "Name"]
-        "XMLParser" -> ["XML", "Parser"]
-        "getHTTPResponse" -> ["get", "HTTP", "Response"]
-    """
-    # Handle acronyms followed by lowercase (e.g., XMLParser -> XML, Parser)
+def _split_camel_case_py(text: str) -> list[str]:
+    """Split camelCase/PascalCase (Python fallback)."""
     text = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1_\2', text)
-    # Handle lowercase followed by uppercase (e.g., getUser -> get, User)
     text = re.sub(r'([a-z\d])([A-Z])', r'\1_\2', text)
     return text.split('_')
 
 
-def split_snake_case(text: str) -> list[str]:
-    """Split snake_case and SCREAMING_SNAKE_CASE into words."""
-    return [part for part in text.split('_') if part]
-
-
-def split_kebab_case(text: str) -> list[str]:
-    """Split kebab-case into words."""
-    return [part for part in text.split('-') if part]
-
-
-def extract_code_tokens(text: str) -> list[str]:
-    """Extract meaningful tokens from code text.
-
-    This handles:
-    - camelCase, PascalCase
-    - snake_case, SCREAMING_SNAKE_CASE
-    - kebab-case
-    - Number-suffixed identifiers (e.g., model_v2, configV3)
-    - Common code patterns
-
-    Args:
-        text: Source code or code-related text
-
-    Returns:
-        List of normalized tokens
-    """
-    # First, extract potential identifiers (alphanumeric with underscores/dashes)
-    identifier_pattern = r'[a-zA-Z_][a-zA-Z0-9_-]*'
-    identifiers = re.findall(identifier_pattern, text)
-
+def _extract_code_tokens_py(text: str) -> list[str]:
+    """Extract code tokens (Python fallback)."""
+    identifiers = re.findall(r'[a-zA-Z_][a-zA-Z0-9_-]*', text)
     tokens = []
 
     for identifier in identifiers:
-        # Skip very short identifiers
         if len(identifier) < MIN_TOKEN_LENGTH:
             continue
 
-        # Split by multiple conventions
-        parts = []
-
-        # First split by underscores and dashes
         for segment in re.split(r'[_-]+', identifier):
             if not segment:
                 continue
-            # Then split camelCase within each segment
-            camel_parts = split_camel_case(segment)
-            parts.extend(camel_parts)
-
-        # Normalize and filter
-        for part in parts:
-            normalized = part.lower()
-            # Skip stop words and very short tokens
-            if len(normalized) >= MIN_TOKEN_LENGTH and normalized not in CODE_STOP_WORDS:
-                tokens.append(normalized)
+            for part in _split_camel_case_py(segment):
+                normalized = part.lower()
+                if len(normalized) >= MIN_TOKEN_LENGTH and normalized not in CODE_STOP_WORDS:
+                    tokens.append(normalized)
 
     return tokens
 
 
-def tokenize_for_search(query: str) -> list[str]:
-    """Tokenize a search query for BM25 search.
-
-    More lenient than code extraction - keeps some common terms
-    that might be meaningful in search context.
-
-    Args:
-        query: User's search query
-
-    Returns:
-        List of search tokens
-    """
-    # Extract code-style tokens
-    code_tokens = extract_code_tokens(query)
-
-    # Also extract quoted phrases as single tokens
-    quoted = re.findall(r'"([^"]+)"', query)
-
-    # Add word tokens for natural language queries
+def _tokenize_for_search_py(query: str) -> list[str]:
+    """Tokenize search query (Python fallback)."""
+    code_tokens = _extract_code_tokens_py(query)
     words = re.findall(r'\b[a-zA-Z]{2,}\b', query.lower())
-
-    # Combine, deduplicate, and filter
+    
     all_tokens = set(code_tokens)
     all_tokens.update(word for word in words if word not in CODE_STOP_WORDS)
-
     return list(all_tokens)
 
 
+# Public API - uses Rust when available
+def extract_code_tokens(text: str) -> list[str]:
+    """Extract meaningful tokens from code text."""
+    if _USE_RUST:
+        return _rust_extract(text)
+    return _extract_code_tokens_py(text)
+
+
+def tokenize_for_search(query: str) -> list[str]:
+    """Tokenize a search query for BM25 search."""
+    if _USE_RUST:
+        return _rust_tokenize(query)
+    return _tokenize_for_search_py(query)
+
+
+# Keep these for compatibility
+split_camel_case = _split_camel_case_py
+split_snake_case = lambda text: [p for p in text.split('_') if p]
+split_kebab_case = lambda text: [p for p in text.split('-') if p]
+
+
 def build_tsquery(tokens: list[str], mode: str = "and") -> str:
-    """Build a PostgreSQL tsquery string from tokens.
-
-    Args:
-        tokens: List of search tokens
-        mode: "and" for all tokens required, "or" for any token
-
-    Returns:
-        PostgreSQL tsquery string
-    """
+    """Build a PostgreSQL tsquery string from tokens."""
     if not tokens:
         return ""
 
     operator = " & " if mode == "and" else " | "
-
-    # Escape special characters and handle prefix matching
-    escaped_tokens = []
-    for token in tokens:
-        # Add prefix matching for partial word search
-        escaped = token.replace("'", "''").replace("\\", "\\\\")
-        escaped_tokens.append(f"{escaped}:*")
-
-    return operator.join(escaped_tokens)
+    escaped = []
+    for t in tokens:
+        safe = t.replace("'", "''").replace("\\", "\\\\")
+        escaped.append(f"{safe}:*")
+    return operator.join(escaped)
 
 
 def normalize_content_for_fts(content: str) -> str:
-    """Normalize code content for full-text search indexing.
-
-    Expands identifiers so they can be found by individual words.
-    For example: "getUserById" -> "getUserById get user by id"
-
-    Args:
-        content: Source code content
-
-    Returns:
-        Normalized text suitable for FTS indexing
-    """
+    """Normalize code content for full-text search indexing."""
     tokens = extract_code_tokens(content)
-
-    # Create expanded version with original content + extracted tokens
-    # This allows searching for either "getUserById" or "user" to match
-    expanded = content + " " + " ".join(tokens)
-
-    return expanded
+    return content + " " + " ".join(tokens)
