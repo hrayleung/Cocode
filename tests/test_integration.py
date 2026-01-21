@@ -271,42 +271,27 @@ class TestIncrementalIndexing:
         assert _get_cached_hash("repo1", "file.py") is None
 
 
-class TestModelRegistry:
-    """Test embedding model registry."""
+class TestModelDimensions:
+    """Test embedding model dimensions reference."""
 
-    def test_get_model_info(self):
-        from src.embeddings.provider import get_model_info, MODEL_REGISTRY
+    def test_model_dimensions_exist(self):
+        from src.embeddings.provider import MODEL_DIMENSIONS
 
-        # Default model
-        info = get_model_info("jina")
-        assert info["model"] == "jina-embeddings-v3"
-        assert info["dimensions"] == 1024
+        # Check all providers have dimensions
+        assert "openai" in MODEL_DIMENSIONS
+        assert "jina" in MODEL_DIMENSIONS
+        assert "mistral" in MODEL_DIMENSIONS
 
-        # Specific model
-        info = get_model_info("openai", "text-embedding-3-small")
-        assert info["model"] == "text-embedding-3-small"
-        assert info["dimensions"] == 1536
+    def test_jina_dimensions(self):
+        from src.embeddings.provider import MODEL_DIMENSIONS
 
-    def test_unknown_provider_raises(self):
-        from src.embeddings.provider import get_model_info
+        assert MODEL_DIMENSIONS["jina"]["jina-embeddings-v3"] == 1024
 
-        with pytest.raises(ValueError, match="Unknown provider"):
-            get_model_info("unknown_provider")
+    def test_openai_dimensions(self):
+        from src.embeddings.provider import MODEL_DIMENSIONS
 
-    def test_unknown_model_raises(self):
-        from src.embeddings.provider import get_model_info
-
-        with pytest.raises(ValueError, match="Unknown model"):
-            get_model_info("openai", "nonexistent-model")
-
-    def test_all_providers_have_defaults(self):
-        from src.embeddings.provider import MODEL_REGISTRY
-
-        for provider, info in MODEL_REGISTRY.items():
-            assert "default" in info
-            assert "models" in info
-            assert "dimensions" in info
-            assert info["default"] in info["models"]
+        assert MODEL_DIMENSIONS["openai"]["text-embedding-3-large"] == 3072
+        assert MODEL_DIMENSIONS["openai"]["text-embedding-3-small"] == 1536
 
 
 class TestEvaluationMetrics:

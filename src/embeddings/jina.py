@@ -67,7 +67,7 @@ def get_embeddings_late_chunking(chunks: list[str], task: str = "retrieval.passa
     return _extract_embeddings(data["data"])
 
 
-# Approximate token limit for Jina late chunking (8192 tokens ~ 30K chars)
+# Approximate token limit for Jina late chunking (8192 tokens ~ 30K chars per request)
 JINA_LATE_CHUNKING_CHAR_LIMIT = 30000
 
 
@@ -77,21 +77,22 @@ def get_embeddings_batch(texts: list[str], task: str = "retrieval.passage", use_
         return []
     _validate_texts(texts)
     
-    # Validate total length for late chunking
-    if use_late_chunking:
-        total_chars = sum(len(t) for t in texts)
-        if total_chars > JINA_LATE_CHUNKING_CHAR_LIMIT:
-            raise ValueError(
-                f"Total text length ({total_chars} chars) exceeds late_chunking limit "
-                f"({JINA_LATE_CHUNKING_CHAR_LIMIT} chars). Reduce batch size or disable late_chunking."
-            )
-    
     result = []
     for i in range(0, len(texts), MAX_BATCH_SIZE):
-        chunk = texts[i : i + MAX_BATCH_SIZE]
+        batch = texts[i : i + MAX_BATCH_SIZE]
+        
+        # Validate per-batch length for late chunking (limit applies per request)
+        if use_late_chunking:
+            batch_chars = sum(len(t) for t in batch)
+            if batch_chars > JINA_LATE_CHUNKING_CHAR_LIMIT:
+                raise ValueError(
+                    f"Batch text length ({batch_chars} chars) exceeds late_chunking limit "
+                    f"({JINA_LATE_CHUNKING_CHAR_LIMIT} chars). Reduce batch size."
+                )
+        
         data = _make_request({
             "model": settings.jina_model,
-            "input": chunk,
+            "input": batch,
             "task": task,
             "dimensions": settings.embedding_dimensions,
             "normalized": True,

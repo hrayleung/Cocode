@@ -24,40 +24,12 @@ class EmbeddingProvider(Protocol):
         ...
 
 
-# Model registry for supported embedding models
-MODEL_REGISTRY: dict[str, dict] = {
-    "openai": {
-        "models": ["text-embedding-3-large", "text-embedding-3-small", "text-embedding-ada-002"],
-        "default": "text-embedding-3-large",
-        "dimensions": {"text-embedding-3-large": 3072, "text-embedding-3-small": 1536, "text-embedding-ada-002": 1536},
-    },
-    "jina": {
-        "models": ["jina-embeddings-v3", "jina-embeddings-v2-base-code"],
-        "default": "jina-embeddings-v3",
-        "dimensions": {"jina-embeddings-v3": 1024, "jina-embeddings-v2-base-code": 768},
-    },
-    "mistral": {
-        "models": ["codestral-embed"],
-        "default": "codestral-embed",
-        "dimensions": {"codestral-embed": 1024},
-    },
+# Model registry for reference (dimensions used by settings.embedding_dimensions)
+MODEL_DIMENSIONS: dict[str, dict[str, int]] = {
+    "openai": {"text-embedding-3-large": 3072, "text-embedding-3-small": 1536, "text-embedding-ada-002": 1536},
+    "jina": {"jina-embeddings-v3": 1024, "jina-embeddings-v2-base-code": 768},
+    "mistral": {"codestral-embed": 1024},
 }
-
-
-def get_model_info(provider: str, model: str | None = None) -> dict:
-    """Get model info including dimensions."""
-    if provider not in MODEL_REGISTRY:
-        raise ValueError(f"Unknown provider: {provider}")
-    info = MODEL_REGISTRY[provider]
-    model = model or info["default"]
-    
-    if model not in info["models"]:
-        raise ValueError(
-            f"Unknown model '{model}' for provider '{provider}'. "
-            f"Supported models: {info['models']}"
-        )
-    
-    return {"model": model, "dimensions": info["dimensions"][model]}
 
 
 class OpenAIProvider:

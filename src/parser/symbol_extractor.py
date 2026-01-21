@@ -131,12 +131,46 @@ class _SymbolVisitor:
         if name_field is None:
             return None
         name_node = node.child_by_field_name(name_field)
-        if name_node:
-            text = self.get_text(name_node)
-            if "(" in text:
-                text = text.split("(")[0].strip().split()[-1]
-            return text
-        return None
+        if not name_node:
+            return None
+        
+        # For C/C++ declarators, try to find identifier child node first
+        if name_field == "declarator":
+            return self._extract_declarator_name(name_node)
+        
+        text = self.get_text(name_node)
+        if "(" in text:
+            parts = text.split("(")[0].strip().split()
+            if parts:
+                return parts[-1]
+            return None
+        return text
+
+    def _extract_declarator_name(self, node: Node) -> str | None:
+        """Extract function name from C/C++ declarator, handling function pointers."""
+        # Try to find identifier in declarator tree
+        def find_identifier(n: Node) -> str | None:
+            if n.type == "identifier":
+                return self.get_text(n)
+            for child in n.children:
+                result = find_identifier(child)
+                if result:
+                    return result
+            return None
+        
+        name = find_identifier(node)
+        if name:
+            return name
+        
+        # Fallback to text parsing
+        text = self.get_text(node)
+        if "(" in text:
+            parts = text.split("(")[0].strip().split()
+            if parts:
+                # Handle (*foo) pattern
+                last = parts[-1].lstrip("*")
+                return last if last else None
+        return text if text else None
 
     def get_signature(self, node: Node) -> str:
         text = self.get_text(node)
@@ -231,7 +265,8 @@ class _SymbolVisitor:
                 return None, "variable"
 
             if value_node and value_node.type in ("arrow_function", "function"):
-                if name.startswith("use") and len(name) > 3 and name[3].isupper():
+                # React 19 `use` hook or useXxx pattern
+                if name == "use" or (name.startswith("use") and len(name) > 3 and name[3].isupper()):
                     return name, "hook"
                 if name[0].isupper():
                     return name, "component"
