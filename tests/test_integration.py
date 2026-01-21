@@ -149,7 +149,7 @@ class Animal:
 class Dog(Animal):
     pass
 """
-        rels = extract_relationships(code, "python", "models.py")
+        rels = extract_relationships(code, "python")
         assert len(rels) == 1
         assert rels[0].source_name == "Dog"
         assert rels[0].target_name == "Animal"
@@ -163,7 +163,7 @@ class UserService implements IService {
   getData() {}
 }
 """
-        rels = extract_relationships(code, "typescript", "service.ts")
+        rels = extract_relationships(code, "typescript")
         assert len(rels) == 1
         assert rels[0].source_name == "UserService"
         assert rels[0].target_name == "IService"
@@ -176,7 +176,7 @@ class UserService implements IService {
 class Cat(Animal, Serializable):
     pass
 """
-        rels = extract_relationships(code, "python", "models.py")
+        rels = extract_relationships(code, "python")
         assert len(rels) == 2
         targets = {r.target_name for r in rels}
         assert targets == {"Animal", "Serializable"}

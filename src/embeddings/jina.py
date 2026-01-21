@@ -87,7 +87,7 @@ def get_embeddings_batch(texts: list[str], task: str = "retrieval.passage", use_
             if batch_chars > JINA_LATE_CHUNKING_CHAR_LIMIT:
                 raise ValueError(
                     f"Batch text length ({batch_chars} chars) exceeds late_chunking limit "
-                    f"({JINA_LATE_CHUNKING_CHAR_LIMIT} chars). Reduce batch size."
+                    f"({JINA_LATE_CHUNKING_CHAR_LIMIT} chars). Pass shorter texts or disable late chunking."
                 )
         
         data = _make_request({

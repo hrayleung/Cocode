@@ -121,7 +121,7 @@ class _SymbolVisitor:
         self.filename = filename
         self.node_types = SYMBOL_NODE_TYPES.get(language, {})
         self.parent_nodes = PARENT_CONTEXT_NODES.get(language, set())
-        self.is_test_file = _is_test_file(filename, language)
+        self.is_test_file = _is_test_file(filename)
         self.symbols: list[Symbol] = []
 
     def get_text(self, node: Node) -> str:
@@ -250,8 +250,12 @@ class _SymbolVisitor:
                 break
         return name, symbol_type
 
-    def _handle_lexical_declaration(self, node: Node) -> tuple[str | None, str]:
-        """Handle JS/TS lexical_declaration for React components/hooks."""
+    def _handle_lexical_declaration(self, node: Node) -> list[tuple[str, str]]:
+        """Handle JS/TS lexical_declaration for React components/hooks.
+        
+        Returns list of (name, symbol_type) tuples for all declarators.
+        """
+        results: list[tuple[str, str]] = []
         for child in node.children:
             if child.type != "variable_declarator":
                 continue
@@ -262,17 +266,17 @@ class _SymbolVisitor:
 
             name = self.get_text(name_node)
             if name.startswith("[") or name.startswith("{"):
-                return None, "variable"
+                continue  # Skip destructuring
 
             if value_node and value_node.type in ("arrow_function", "function"):
                 # React 19 `use` hook or useXxx pattern
                 if name == "use" or (name.startswith("use") and len(name) > 3 and name[3].isupper()):
-                    return name, "hook"
-                if name[0].isupper():
-                    return name, "component"
-                return name, "function"
-            break
-        return None, "variable"
+                    results.append((name, "hook"))
+                elif name[0].isupper():
+                    results.append((name, "component"))
+                else:
+                    results.append((name, "function"))
+        return results
 
     def visit(self, node: Node, parent_name: str | None = None) -> None:
         node_type = node.type
@@ -293,9 +297,23 @@ class _SymbolVisitor:
             if node_type == "type_declaration" and not name:
                 name, symbol_type = self._handle_go_type_declaration(node)
 
-            # Special handling for JS/TS lexical_declaration
+            # Special handling for JS/TS lexical_declaration - returns list of declarators
             if node_type == "lexical_declaration" and not name:
-                name, symbol_type = self._handle_lexical_declaration(node)
+                declarators = self._handle_lexical_declaration(node)
+                for decl_name, decl_type in declarators:
+                    is_test = self.is_test_file or _is_test_symbol(decl_name, self.language)
+                    self.symbols.append(Symbol(
+                        symbol_name=decl_name,
+                        symbol_type=decl_type,
+                        line_start=node.start_point[0] + 1,
+                        line_end=node.end_point[0] + 1,
+                        signature=self.get_signature(node),
+                        docstring=self.get_docstring(node),
+                        parent_symbol=parent_name,
+                        visibility=self.get_visibility(node, decl_name),
+                        category="test" if is_test else "implementation",
+                    ))
+                return  # Already handled all declarators
 
             if name:
                 actual_type = "method" if parent_name and symbol_type == "function" else symbol_type
@@ -352,12 +370,12 @@ def extract_symbols(content: str, language: str, filename: str) -> list[Symbol]:
         visitor.visit(tree.root_node)
         return visitor.symbols
 
-    except Exception as e:
-        logger.error(f"Error extracting symbols from {language}: {e}")
+    except Exception:
+        logger.exception("Error extracting symbols from %s", language)
         return []
 
 
-def _is_test_file(filename: str, language: str) -> bool:
+def _is_test_file(filename: str) -> bool:
     """Check if file is a test file based on naming conventions."""
     name = Path(filename).stem.lower()
     return any(p in name for p in ("test_", "_test", "tests", "spec")) or "/test" in filename.lower()
@@ -432,7 +450,7 @@ class _RelationshipVisitor:
                 self.visit(child, class_name)
 
 
-def extract_relationships(content: str, language: str, filename: str) -> list[SymbolRelationship]:
+def extract_relationships(content: str, language: str) -> list[SymbolRelationship]:
     """Extract inheritance/implementation relationships from source code."""
     parser = get_parser(language)
     if not parser:
@@ -452,6 +470,6 @@ def extract_relationships(content: str, language: str, filename: str) -> list[Sy
         visitor.visit(tree.root_node)
         return visitor.relationships
 
-    except Exception as e:
-        logger.error(f"Error extracting relationships from {language}: {e}")
+    except Exception:
+        logger.exception("Error extracting relationships from %s", language)
         return []
