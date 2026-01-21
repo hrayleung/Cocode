@@ -16,6 +16,16 @@ rayon = "1.10"
 ahash = "0.8"
 smallvec = "1.13"
 
+# Tree-sitter parsing
+tree-sitter = "0.25"
+tree-sitter-python = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-rust = "0.23"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+
 # BM25 and text processing
 unicode-segmentation = "1.12"
 

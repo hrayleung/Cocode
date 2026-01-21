@@ -22,6 +22,11 @@ import tree_sitter_typescript as ts_typescript
 
 logger = logging.getLogger(__name__)
 
+from src.rust_bridge import (
+    is_language_supported as _rust_is_language_supported,
+    extract_imports_ast as _rust_extract_imports_ast,
+)
+
 
 class LanguageParsers:
     """Singleton manager for Tree-sitter language parsers.
@@ -80,13 +85,12 @@ def get_parser(language: str) -> Parser | None:
 def is_language_supported(language: str) -> bool:
     """Check if a language is supported for AST parsing.
 
-    Args:
-        language: Language name to check
-
-    Returns:
-        True if the language can be parsed
+    Prefers the Rust parser registry, with a fallback to Python Tree-sitter.
     """
-    return language in LanguageParsers().parsers
+    try:
+        return _rust_is_language_supported(language)
+    except Exception:
+        return language in LanguageParsers().parsers
 
 
 def extract_python_imports(tree_root: Node, source_bytes: bytes) -> list[str]:
@@ -229,8 +233,8 @@ def extract_javascript_imports(tree_root: Node, source_bytes: bytes) -> list[str
     return list(set(imports))
 
 
-def extract_imports_ast(content: str, language: str) -> list[str]:
-    """Extract imports using Tree-sitter AST parsing."""
+def _extract_imports_ast_python(content: str, language: str) -> list[str]:
+    """Extract imports using Python Tree-sitter parsing (fallback)."""
     parser = get_parser(language)
     if not parser:
         logger.debug(f"No parser for language: {language}")
@@ -265,6 +269,18 @@ def extract_imports_ast(content: str, language: str) -> list[str]:
     except Exception as e:
         logger.error(f"Error extracting imports from {language}: {e}")
         return []
+
+
+def extract_imports_ast(content: str, language: str) -> list[str]:
+    """Extract imports using Rust Tree-sitter parsing.
+
+    Falls back to the Python Tree-sitter implementation when Rust parsing fails.
+    """
+    try:
+        return _rust_extract_imports_ast(content, language)
+    except Exception as e:
+        logger.debug(f"Rust import extraction failed, falling back to Python: {e}")
+        return _extract_imports_ast_python(content, language)
 
 
 # Extension to language mapping

@@ -128,8 +128,8 @@ def extract_go_calls(tree_root: Node, source_bytes: bytes, current_function_name
     return calls
 
 
-def extract_calls(code: str, language: str, current_function_name: Optional[str] = None) -> list[FunctionCall]:
-    """Extract function calls from code using AST parsing."""
+def _extract_calls_python(code: str, language: str, current_function_name: Optional[str] = None) -> list[FunctionCall]:
+    """Extract function calls using Python Tree-sitter parsing (fallback)."""
     if not code or not code.strip():
         return []
 
@@ -153,6 +153,36 @@ def extract_calls(code: str, language: str, current_function_name: Optional[str]
     except Exception as e:
         logger.warning(f"Failed to extract calls from {language}: {e}")
         return []
+
+
+def extract_calls(code: str, language: str, current_function_name: Optional[str] = None) -> list[FunctionCall]:
+    """Extract function calls using Rust Tree-sitter parsing.
+
+    Falls back to the Python Tree-sitter implementation when Rust parsing fails.
+    """
+    if not code or not code.strip():
+        return []
+
+    try:
+        from src.rust_bridge import extract_calls as rust_extract_calls
+
+        raw = rust_extract_calls(code, language, current_function_name)
+        out: list[FunctionCall] = []
+        for function_name, line_number, call_type, context, object_name, is_recursive in raw:
+            out.append(
+                FunctionCall(
+                    function_name=function_name,
+                    line_number=int(line_number),
+                    call_type=call_type,
+                    context=context,
+                    object_name=object_name,
+                    is_recursive=bool(is_recursive),
+                )
+            )
+        return out
+    except Exception as e:
+        logger.debug(f"Rust call extraction failed, falling back to Python: {e}")
+        return _extract_calls_python(code, language, current_function_name)
 
 
 def extract_calls_from_function(code: str, language: str, function_name: str,

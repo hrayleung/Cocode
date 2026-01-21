@@ -70,30 +70,47 @@ def _normalize_weights(weights: list[float] | None, n: int) -> list[float]:
     return [w / total for w in weights]
 
 
+def _symbol_key(hit: SymbolMatch) -> str:
+    """Build a stable key for RRF fusion."""
+    return f"{hit.filename}:{hit.symbol_name}:{hit.symbol_type}:{hit.line_start}:{hit.line_end}"
+
+
 def reciprocal_rank_fusion_symbols(
     result_lists: list[list[SymbolMatch]],
     *,
     k: int = 40,
     weights: list[float] | None = None,
 ) -> list[SymbolMatch]:
-    """Fuse multiple ranked symbol lists using Reciprocal Rank Fusion."""
+    """Fuse multiple ranked symbol lists using Rust-accelerated RRF."""
 
     if not result_lists:
         return []
 
-    weights = _normalize_weights(weights, len(result_lists))
+    from src.rust_bridge import reciprocal_rank_fusion_weighted
 
-    scores: dict[tuple, float] = defaultdict(float)
-    best: dict[tuple, SymbolMatch] = {}
+    norm_weights = _normalize_weights(weights, len(result_lists))
 
-    for weight, results in zip(weights, result_lists, strict=True):
-        for rank, hit in enumerate(results):
-            key = hit.key()
-            scores[key] += weight / (k + rank + 1)
+    ranked_lists: list[list[tuple[str, float]]] = []
+    best: dict[str, SymbolMatch] = {}
+
+    for results in result_lists:
+        out: list[tuple[str, float]] = []
+        for hit in results:
+            key = _symbol_key(hit)
+            out.append((key, float(hit.score)))
             if key not in best or hit.score > best[key].score:
                 best[key] = hit
+        ranked_lists.append(out)
 
-    fused = [replace(best[k], score=scores[k]) for k in sorted(scores, key=scores.get, reverse=True)]
+    fused_scores = reciprocal_rank_fusion_weighted(ranked_lists, norm_weights, k=float(k))
+
+    fused: list[SymbolMatch] = []
+    for key, fused_score in fused_scores:
+        rep = best.get(key)
+        if rep is None:
+            continue
+        fused.append(replace(rep, score=float(fused_score)))
+
     return fused
 
 
@@ -309,6 +326,19 @@ def extract_symbol_code(
     - file_line_count
     - truncated
     """
+
+    try:
+        from src.rust_bridge import extract_code_by_line_range
+
+        return extract_code_by_line_range(
+            str(repo_path),
+            filename,
+            line_start,
+            line_end,
+            max_code_chars,
+        )
+    except Exception as e:
+        logger.debug(f"Rust code extraction failed, falling back to Python: {e}")
 
     repo_root = Path(repo_path).resolve(strict=False)
     file_path = _safe_resolve_file(repo_root, filename)

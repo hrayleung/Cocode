@@ -14,7 +14,7 @@ from typing import Any
 from psycopg import sql
 
 from config.settings import settings
-from cocode_rust import compute_file_hash as _compute_file_hash
+from src.rust_bridge import compute_file_hash as _compute_file_hash
 from src.embeddings.provider import get_provider
 from src.parser.ast_parser import get_language_from_file
 from src.parser.symbol_extractor import Symbol, extract_symbols

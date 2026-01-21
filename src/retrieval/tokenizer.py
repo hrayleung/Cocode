@@ -5,7 +5,7 @@ Uses Rust for performance.
 
 import re
 
-from cocode_rust import (
+from src.rust_bridge import (
     extract_code_tokens,
     tokenize_for_search,
 )

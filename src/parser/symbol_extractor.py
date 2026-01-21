@@ -349,8 +349,8 @@ class _SymbolVisitor:
             self.visit(child, parent_name)
 
 
-def extract_symbols(content: str, language: str, filename: str) -> list[Symbol]:
-    """Extract symbols from source code using generic tree-sitter parsing."""
+def _extract_symbols_python(content: str, language: str, filename: str) -> list[Symbol]:
+    """Extract symbols using Python Tree-sitter parsing (fallback)."""
     parser = get_parser(language)
     if not parser:
         logger.debug(f"No parser for language: {language}")
@@ -373,6 +373,46 @@ def extract_symbols(content: str, language: str, filename: str) -> list[Symbol]:
     except Exception:
         logger.exception("Error extracting symbols from %s", language)
         return []
+
+
+def extract_symbols(content: str, language: str, filename: str) -> list[Symbol]:
+    """Extract symbols using Rust Tree-sitter parsing.
+
+    Falls back to the Python Tree-sitter implementation when Rust parsing fails.
+    """
+    try:
+        from src.rust_bridge import extract_symbols as rust_extract_symbols
+
+        raw = rust_extract_symbols(content, language, filename)
+        out: list[Symbol] = []
+        for (
+            symbol_name,
+            symbol_type,
+            line_start,
+            line_end,
+            signature,
+            docstring,
+            parent_symbol,
+            visibility,
+            category,
+        ) in raw:
+            out.append(
+                Symbol(
+                    symbol_name=symbol_name,
+                    symbol_type=symbol_type,
+                    line_start=int(line_start),
+                    line_end=int(line_end),
+                    signature=signature,
+                    docstring=docstring,
+                    parent_symbol=parent_symbol,
+                    visibility=visibility,
+                    category=category,
+                )
+            )
+        return out
+    except Exception as e:
+        logger.debug(f"Rust symbol extraction failed, falling back to Python: {e}")
+        return _extract_symbols_python(content, language, filename)
 
 
 def _is_test_file(filename: str) -> bool:
@@ -450,8 +490,8 @@ class _RelationshipVisitor:
                 self.visit(child, class_name)
 
 
-def extract_relationships(content: str, language: str) -> list[SymbolRelationship]:
-    """Extract inheritance/implementation relationships from source code."""
+def _extract_relationships_python(content: str, language: str) -> list[SymbolRelationship]:
+    """Extract relationships using Python Tree-sitter parsing (fallback)."""
     parser = get_parser(language)
     if not parser:
         return []
@@ -473,3 +513,29 @@ def extract_relationships(content: str, language: str) -> list[SymbolRelationshi
     except Exception:
         logger.exception("Error extracting relationships from %s", language)
         return []
+
+
+def extract_relationships(content: str, language: str) -> list[SymbolRelationship]:
+    """Extract relationships using Rust Tree-sitter parsing.
+
+    Falls back to the Python Tree-sitter implementation when Rust parsing fails.
+    """
+    try:
+        from src.rust_bridge import extract_relationships as rust_extract_relationships
+
+        raw = rust_extract_relationships(content, language)
+        out: list[SymbolRelationship] = []
+        for source_name, target_name, relationship_type, source_line, confidence in raw:
+            out.append(
+                SymbolRelationship(
+                    source_name=source_name,
+                    target_name=target_name,
+                    relationship_type=relationship_type,
+                    source_line=int(source_line),
+                    confidence=float(confidence),
+                )
+            )
+        return out
+    except Exception as e:
+        logger.debug(f"Rust relationship extraction failed, falling back to Python: {e}")
+        return _extract_relationships_python(content, language)

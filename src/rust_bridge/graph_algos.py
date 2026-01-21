@@ -3,6 +3,7 @@
 from cocode_rust import (
     pagerank as _rust_pagerank,
     bfs_expansion as _rust_bfs_expansion,
+    bfs_traversal_edges as _rust_bfs_traversal_edges,
     strongly_connected_components as _rust_scc,
 )
 
@@ -26,6 +27,20 @@ def bfs_expansion(
 ) -> dict[str, int]:
     """Multi-hop BFS graph expansion. Returns node -> hop distance mapping."""
     return _rust_bfs_expansion(edges, start_nodes, max_hops, max_results, bidirectional)
+
+
+def bfs_traversal_edges(
+    edges: list[tuple[str, str]],
+    start_nodes: list[str],
+    max_hops: int = 3,
+    max_results: int = 30,
+    bidirectional: bool = True,
+) -> list[tuple[str, str, str, int]]:
+    """BFS traversal returning predecessor edges in BFS order.
+
+    Returns tuples of (source_file, target_file, relation_type, hop_distance).
+    """
+    return _rust_bfs_traversal_edges(edges, start_nodes, max_hops, max_results, bidirectional)
 
 
 def strongly_connected_components(edges: list[tuple[str, str]]) -> list[list[str]]:
