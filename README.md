@@ -47,16 +47,40 @@ This combination enables fast, accurate semantic search that stays up-to-date as
 - Python 3.10+
 - PostgreSQL with `pgvector` (`vector`) extension (the server will also attempt to enable `pgcrypto` for UUIDs)
 - API key for at least one embedding provider
+- **Rust toolchain** (only required for building from source):
+  - Install via [rustup](https://rustup.rs/): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+  - Includes `cargo` and the Rust compiler
 
-### Setup
+### Quick Install (Recommended)
+
+Install from PyPI using `pip`, `uvx`, or `pipx`:
+
+```bash
+# Using pip
+pip install cocode-mcp
+
+# Or using uvx (isolated environment, no global install)
+uvx --from cocode-mcp cocode
+
+# Or using pipx (isolated environment with global command)
+pipx install cocode-mcp
+
+# Verify installation
+cocode --help
+```
+
+### From Source
 
 #### Standard Installation
 
 ```bash
-# Clone and install
+# Clone the repository
 git clone https://github.com/hrayleung/Cocode.git
 cd Cocode
-pip install -e ".[dev]"
+
+# Install dependencies and build Rust extensions (requires Rust toolchain)
+# This single command installs Python deps and builds the Rust extension in release mode
+maturin develop --release
 
 # Create .env file
 cp .env.example .env
