@@ -32,6 +32,10 @@ def _normalize_cocoindex_globset_patterns(patterns: list[str]) -> list[str]:
             continue
         if p.startswith("!"):
             # globset doesn't support gitignore negation; ignore these.
+            logger.warning(
+                "Ignoring gitignore negation pattern %r because CocoIndex globset doesn't support '!'",
+                p,
+            )
             continue
         if p.startswith("/"):
             p = p[1:]
