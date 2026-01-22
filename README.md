@@ -97,8 +97,8 @@ cd Cocode
 # Enter dev shell (includes Python 3.11, PostgreSQL 16, and dependencies)
 nix develop
 
-# Install Python package
-pip install -e ".[dev]"
+# Install dependencies and build Rust extensions (requires Rust toolchain)
+maturin develop --release
 
 # Create .env file (automatically copied by shellHook)
 # Edit .env with your API keys
@@ -177,7 +177,7 @@ Claude Desktop reads its configuration from `claude_desktop_config.json`:
   "mcpServers": {
     "cocode": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/hrayleung/Cocode.git", "cocode"],
+      "args": ["--from", "cocode-mcp", "cocode"],
       "env": {
         "COCOINDEX_DATABASE_URL": "postgresql://localhost:5432/cocode",
         "JINA_API_KEY": "jina_..."
@@ -186,6 +186,8 @@ Claude Desktop reads its configuration from `claude_desktop_config.json`:
   }
 }
 ```
+
+*Note: Before PyPI publication, use `"args": ["--from", "git+https://github.com/hrayleung/Cocode.git", "cocode"]` to install from source.*
 
 </details>
 
@@ -196,13 +198,13 @@ Claude Desktop reads its configuration from `claude_desktop_config.json`:
 
 ```bash
 # Add to your user config (available across all projects)
-claude mcp add -s user cocode -- cocode
+claude mcp add --scope user cocode -- cocode
 
 # Or add to current project only
-claude mcp add -s project cocode -- cocode
+claude mcp add --scope project cocode -- cocode
 
 # With environment variables baked in
-claude mcp add -s user \
+claude mcp add --scope user \
   -e COCOINDEX_DATABASE_URL=postgresql://localhost:5432/cocode \
   -e JINA_API_KEY="${JINA_API_KEY}" \
   -e EMBEDDING_PROVIDER=jina \
