@@ -172,6 +172,8 @@ def _compute_semantic_score(words: list[str]) -> int:
 def _normalize_rrf_weights(weights: list[float] | None, n: int) -> list[float]:
     if weights is None:
         return [1.0] * n
+    if len(weights) != n:
+        raise ValueError("weights length must equal number of result lists")
     total = sum(weights)
     return [w / total for w in weights] if total > 0 else [1.0 / n] * n
 

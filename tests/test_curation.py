@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from config.settings import settings
 from src.models import SearchResult
 from src.retrieval.curation import curate_code_sections, merge_line_ranges

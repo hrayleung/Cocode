@@ -742,7 +742,7 @@ pub fn extract_relationships(code: &str, language: &str) -> PyResult<Vec<(String
             }
         }
 
-        if language == "typescript" {
+        if language == "typescript" || language == "tsx" {
             if let Some(cls) = current_class.clone() {
                 match node.kind() {
                     "extends_clause" => {

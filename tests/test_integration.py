@@ -10,7 +10,6 @@ Tests the integration between:
 """
 
 import pytest
-from unittest.mock import MagicMock, patch
 
 
 class TestEmbeddingCacheIntegration:

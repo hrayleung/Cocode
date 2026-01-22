@@ -5,6 +5,7 @@ cache performance, and embedding requests. Designed for easy integration with
 Prometheus or other monitoring systems.
 """
 
+import functools
 import threading
 import time
 from dataclasses import dataclass, field
@@ -182,6 +183,7 @@ def record_embedding_request(ms: float) -> None:
 def timed(record_fn: Callable[[float], None]):
     """Decorator to time a function and record its latency."""
     def decorator(fn):
+        @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             start = time.perf_counter()
             try:

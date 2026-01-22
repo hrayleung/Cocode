@@ -381,7 +381,8 @@ def _build_ignore_spec(repo_root: Path, excluded_patterns: list[str]) -> GitIgno
 def _is_file_excluded(relative_path: str, ignore_spec: GitIgnoreSpec) -> bool:
     """Check if a file path matches any exclusion pattern."""
 
-    return bool(ignore_spec.match_file(relative_path))
+    normalized = relative_path.replace("\\", "/")
+    return bool(ignore_spec.match_file(normalized))
 
 
 def index_repository_symbols(
@@ -428,7 +429,7 @@ def index_repository_symbols(
         for file_path in repo_path_obj.glob(pattern):
             if not file_path.is_file():
                 continue
-            rel = str(file_path.relative_to(repo_path_obj))
+            rel = str(file_path.relative_to(repo_path_obj)).replace("\\", "/")
             if _is_file_excluded(rel, ignore_spec):
                 continue
             files_to_process.append(file_path)
@@ -445,7 +446,7 @@ def index_repository_symbols(
     for file_path in files_to_process:
         try:
             content = file_path.read_text(encoding="utf-8")
-            relative_path = str(file_path.relative_to(repo_path_obj))
+            relative_path = str(file_path.relative_to(repo_path_obj)).replace("\\", "/")
             count, success = index_file_symbols(repo_name, relative_path, content, embedding_provider)
             stats["files_processed"] += 1
             stats["symbols_indexed"] += count
