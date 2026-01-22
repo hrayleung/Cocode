@@ -271,6 +271,7 @@ pub fn bfs_traversal_edges(
             queue.push_back((node, 0, None, None));
         }
     }
+    let start_count = visited.len();
 
     while let Some((current, hop, parent, relation)) = queue.pop_front() {
         if results.len() >= max_results {
@@ -293,7 +294,9 @@ pub fn bfs_traversal_edges(
         // Forward traversal: current imports neighbor.
         if let Some(neighbors) = forward_edges.get(&current) {
             for neighbor in neighbors {
-                if results.len() >= max_results {
+                if results.len() >= max_results
+                    || visited.len().saturating_sub(start_count) >= max_results
+                {
                     break;
                 }
                 if visited.insert(neighbor.clone()) {
@@ -311,7 +314,9 @@ pub fn bfs_traversal_edges(
         if bidirectional {
             if let Some(neighbors) = backward_edges.get(&current) {
                 for neighbor in neighbors {
-                    if results.len() >= max_results {
+                    if results.len() >= max_results
+                        || visited.len().saturating_sub(start_count) >= max_results
+                    {
                         break;
                     }
                     if visited.insert(neighbor.clone()) {
