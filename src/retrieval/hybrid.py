@@ -181,18 +181,14 @@ def _apply_diversity_filter(results: list[SearchResult], target_count: int) -> l
     if len(results) <= target_count:
         return results
 
-    try:
-        from src.rust_bridge import mmr_select_indices
+    from src.rust_bridge import mmr_select_indices
 
-        scores = [float(r.score) for r in results]
-        contents = [r.content.lower() for r in results]
-        idxs = mmr_select_indices(scores, contents, target_count, lambda_param=0.7)
+    scores = [float(r.score) for r in results]
+    contents = [r.content.lower() for r in results]
+    idxs = mmr_select_indices(scores, contents, target_count, lambda_param=0.7)
 
-        # Preserve selection order returned by Rust.
-        return [results[i] for i in idxs if 0 <= i < len(results)]
-    except Exception as e:
-        logger.debug(f"MMR diversity filter failed, falling back to truncation: {e}")
-        return results[:target_count]
+    # Preserve selection order returned by Rust.
+    return [results[i] for i in idxs if 0 <= i < len(results)]
 
 
 def reciprocal_rank_fusion(

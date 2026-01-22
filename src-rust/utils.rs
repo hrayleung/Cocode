@@ -7,7 +7,7 @@ use ahash::AHashSet;
 use pyo3::types::PyDict;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Compute truncated SHA256 hash of content (16 hex chars).
 #[pyfunction]
@@ -161,6 +161,14 @@ fn resolve_safe_file(repo_root: &Path, filename: &str) -> PyResult<PathBuf> {
     if rel.is_absolute() {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "absolute paths are not allowed",
+        ));
+    }
+
+    // Prevent obvious path traversal before we attempt any filesystem operations.
+    // We still canonicalize and enforce repo_root containment below to handle symlinks.
+    if rel.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "path traversal is not allowed",
         ));
     }
 

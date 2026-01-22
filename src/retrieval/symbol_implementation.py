@@ -292,24 +292,6 @@ def select_top_symbols(
     return selected
 
 
-def _safe_resolve_file(repo_root: Path, filename: str) -> Path:
-    rel = Path(filename)
-    if rel.is_absolute():
-        raise ValueError("absolute paths are not allowed")
-    resolved = (repo_root / rel).resolve(strict=False)
-    try:
-        if not resolved.is_relative_to(repo_root):
-            raise ValueError("file escapes repo root")
-    except AttributeError:
-        # Python < 3.9
-        try:
-            resolved.relative_to(repo_root)
-        except ValueError:
-            raise ValueError("file escapes repo root")
-
-    return resolved
-
-
 def extract_symbol_code(
     *,
     repo_path: str | Path,
@@ -325,75 +307,16 @@ def extract_symbol_code(
     - extracted_line_start / extracted_line_end
     - file_line_count
     - truncated
+
+    This function intentionally does not fall back to Python.
     """
 
-    try:
-        from src.rust_bridge import extract_code_by_line_range
+    from src.rust_bridge import extract_code_by_line_range
 
-        return extract_code_by_line_range(
-            str(repo_path),
-            filename,
-            line_start,
-            line_end,
-            max_code_chars,
-        )
-    except Exception as e:
-        logger.debug(f"Rust code extraction failed, falling back to Python: {e}")
-
-    repo_root = Path(repo_path).resolve(strict=False)
-    file_path = _safe_resolve_file(repo_root, filename)
-
-    try:
-        text = file_path.read_text(encoding="utf-8", errors="replace")
-    except OSError as e:
-        raise FileNotFoundError(f"cannot read file: {filename}") from e
-
-    lines = text.splitlines(keepends=True)
-    line_count = len(lines)
-
-    if line_start < 1:
-        raise ValueError("line_start must be >= 1")
-    if line_end < line_start:
-        raise ValueError("line_end must be >= line_start")
-    if line_start > max(line_count, 1):
-        raise ValueError(f"line_start beyond end of file ({line_count} lines)")
-
-    clamped_end = min(line_end, max(line_count, 1))
-    slice_lines = lines[line_start - 1:clamped_end]
-
-    if max_code_chars is None:
-        extracted_end = line_start + len(slice_lines) - 1 if slice_lines else line_start - 1
-        return {
-            "code": "".join(slice_lines),
-            "extracted_line_start": line_start,
-            "extracted_line_end": extracted_end,
-            "file_line_count": line_count,
-            "truncated": clamped_end < line_end,
-        }
-
-    out: list[str] = []
-    total = 0
-    truncated = False
-    extracted_end = line_start - 1
-
-    for i, line in enumerate(slice_lines, start=line_start):
-        if total + len(line) > max_code_chars:
-            if not out:
-                # Single very long line; truncate at char boundary.
-                out.append(line[:max_code_chars])
-                extracted_end = i
-                truncated = True
-            else:
-                truncated = True
-            break
-        out.append(line)
-        total += len(line)
-        extracted_end = i
-
-    return {
-        "code": "".join(out),
-        "extracted_line_start": line_start,
-        "extracted_line_end": extracted_end,
-        "file_line_count": line_count,
-        "truncated": truncated or (clamped_end < line_end),
-    }
+    return extract_code_by_line_range(
+        str(repo_path),
+        filename,
+        line_start,
+        line_end,
+        max_code_chars,
+    )

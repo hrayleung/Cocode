@@ -4,7 +4,6 @@ import pytest
 from src.parser.call_extractor import (
     extract_calls,
     extract_calls_from_function,
-    extract_python_calls,
     FunctionCall,
 )
 
