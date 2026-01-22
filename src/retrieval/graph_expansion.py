@@ -1,17 +1,19 @@
 """Graph-based expansion to find related files.
 
-Parses imports/dependencies from code files using AST parsing and uses them to
-expand search results with contextually related files.
+Parses imports/dependencies from code files using Tree-sitter AST parsing
+and uses them to expand search results with contextually related files.
 """
 
 import logging
-import re
-from collections import defaultdict
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from psycopg import sql
+
 from src.storage.postgres import get_connection
 from src.parser.ast_parser import extract_imports_ast, get_language_from_file
+from src.storage.schema import sanitize_repo_name
 
 logger = logging.getLogger(__name__)
 
@@ -25,44 +27,8 @@ class FileRelation:
     hop_distance: int = 1  # How many hops away from the original file
 
 
-# Import patterns for different languages
-IMPORT_PATTERNS = {
-    "python": [
-        re.compile(r'^from\s+([\w.]+)\s+import', re.MULTILINE),
-        re.compile(r'^import\s+([\w.]+)', re.MULTILINE),
-        # Handle imports inside try blocks (common for optional dependencies)
-        re.compile(r'^\s+from\s+([\w.]+)\s+import', re.MULTILINE),
-        re.compile(r'^\s+import\s+([\w.]+)', re.MULTILINE),
-    ],
-    "typescript": [
-        re.compile(r"import\s+.*?\s+from\s+['\"]([^'\"]+)['\"]", re.MULTILINE),
-        re.compile(r"import\s+['\"]([^'\"]+)['\"]", re.MULTILINE),
-        re.compile(r"require\s*\(\s*['\"]([^'\"]+)['\"]\s*\)", re.MULTILINE),
-        re.compile(r"import\s+type\s+\{[^}]+\}\s+from\s+['\"]([^'\"]+)['\"]", re.MULTILINE),
-        re.compile(r"export\s+\*\s+from\s+['\"]([^'\"]+)['\"]", re.MULTILINE),
-    ],
-    "javascript": [
-        re.compile(r"import\s+.*?\s+from\s+['\"]([^'\"]+)['\"]", re.MULTILINE),
-        re.compile(r"import\s+['\"]([^'\"]+)['\"]", re.MULTILINE),
-        re.compile(r"require\s*\(\s*['\"]([^'\"]+)['\"]\s*\)", re.MULTILINE),
-    ],
-    "go": [
-        re.compile(r'import\s+["\']([^"\']+)["\']', re.MULTILINE),
-        re.compile(r'import\s*\(\s*[^)]*?["\']([^"\']+)["\']', re.MULTILINE | re.DOTALL),
-    ],
-    "rust": [
-        re.compile(r'^use\s+([\w:]+)', re.MULTILINE),
-        re.compile(r'^mod\s+(\w+)', re.MULTILINE),
-        re.compile(r'^extern\s+crate\s+\w+', re.MULTILINE),
-    ],
-}
-
-
 def extract_imports(content: str, language: str) -> list[str]:
-    """Extract import statements from code content using AST parsing.
-
-    Uses Tree-sitter AST parsing for accurate import extraction.
-    Falls back to regex if AST parsing is unavailable or fails.
+    """Extract import statements from code content using Tree-sitter AST parsing.
 
     Args:
         content: Source code content
@@ -71,27 +37,10 @@ def extract_imports(content: str, language: str) -> list[str]:
     Returns:
         List of imported module/file paths
     """
-    # Try AST-based extraction first
-    try:
-        imports = extract_imports_ast(content, language)
-        if imports:  # If AST parsing succeeded and found imports
-            logger.debug(f"Extracted {len(imports)} imports using AST parsing for {language}")
-            return imports
-    except Exception as e:
-        logger.debug(f"AST import extraction failed for {language}: {e}, falling back to regex")
-
-    # Fall back to regex-based extraction
-    patterns = IMPORT_PATTERNS.get(language, [])
-    imports = []
-
-    for pattern in patterns:
-        matches = pattern.findall(content)
-        imports.extend(matches)
-
+    imports = extract_imports_ast(content, language)
     if imports:
-        logger.debug(f"Extracted {len(imports)} imports using regex for {language}")
-
-    return list(set(imports))
+        logger.debug(f"Extracted {len(imports)} imports using AST parsing for {language}")
+    return imports
 
 
 def resolve_import_to_file(
@@ -174,10 +123,9 @@ def get_repo_files(repo_name: str) -> set[str]:
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(f"""
-                SELECT DISTINCT filename
-                FROM {table_name}
-            """)
+            cur.execute(
+                sql.SQL("SELECT DISTINCT filename FROM {}").format(sql.Identifier(table_name))
+            )
             return {row[0] for row in cur.fetchall()}
 
 
@@ -211,20 +159,18 @@ def build_import_graph(repo_name: str, use_cache: bool = True) -> dict[str, list
         with conn.cursor(name="graph_expansion_cursor") as cur:
             cur.itersize = 100
             # First pass: collect all filenames
-            cur.execute(f"""
-                SELECT DISTINCT filename
-                FROM {table_name}
-            """)
+            cur.execute(
+                sql.SQL("SELECT DISTINCT filename FROM {}").format(sql.Identifier(table_name))
+            )
             repo_files = {row[0] for row in cur.fetchall()}
 
         # Second pass: extract imports with full repo_files set available
         import_graph: dict[str, list[str]] = {}
         with conn.cursor(name="graph_content_cursor") as cur:
             cur.itersize = 100
-            cur.execute(f"""
-                SELECT filename, content
-                FROM {table_name}
-            """)
+            cur.execute(
+                sql.SQL("SELECT filename, content FROM {}").format(sql.Identifier(table_name))
+            )
 
             # Track which files we've already processed (multiple chunks per file)
             processed_files: dict[str, list[str]] = {}
@@ -274,53 +220,151 @@ def multi_hop_traversal(
     max_hops: int = 3,
     max_results: int = 30,
 ) -> list[tuple[str, str, str, int]]:
-    """Perform multi-hop BFS traversal of the import graph.
+    """Perform multi-hop BFS traversal using Rust.
 
-    Args:
-        start_files: Initial files to start traversal from
-        import_graph: Forward graph (file -> files it imports)
-        reverse_graph: Reverse graph (file -> files that import it)
-        max_hops: Maximum hop distance to traverse
-        max_results: Maximum number of results to return
+    reverse_graph is accepted for API compatibility but is not used.
 
     Returns:
         List of tuples: (source_file, target_file, relation_type, hop_distance)
     """
-    visited = set(start_files)
-    results = []
 
-    # Queue contains tuples: (current_file, hop_distance, came_from, relation_type)
-    # For start files, came_from is None
-    queue = [(file, 0, None, None) for file in start_files]
+    from src.rust_bridge import bfs_traversal_edges as rust_bfs_edges
 
-    while queue and len(results) < max_results:
-        current_file, distance, came_from, relation = queue.pop(0)
+    edges: list[tuple[str, str]] = []
+    for source, targets in import_graph.items():
+        for target in targets:
+            edges.append((source, target))
 
-        # Skip if we've exceeded max hops or already visited
-        if distance > max_hops:
-            continue
+    return rust_bfs_edges(
+        edges,
+        start_files,
+        max_hops=max_hops,
+        max_results=max_results,
+        bidirectional=True,
+    )
 
-        # Add result (skip start files themselves)
-        if came_from is not None and distance > 0:
-            results.append((came_from, current_file, relation, distance))
 
-        # Don't explore further if we've hit max hops
-        if distance >= max_hops:
-            continue
+def _get_related_files_from_graph_cache(
+    repo_name: str,
+    filenames: list[str],
+    *,
+    max_related: int,
+    max_hops: int,
+) -> list[FileRelation] | None:
+    """Fetch related files via the per-repo graph_cache table.
 
-        # Explore files this file imports (forward edges)
-        for imported_file in import_graph.get(current_file, []):
-            if imported_file not in visited:
-                visited.add(imported_file)
-                queue.append((imported_file, distance + 1, current_file, "imports"))
+    Returns None when the cache table isn't available or inputs are invalid,
+    so callers can fall back to rebuilding the graph from indexed chunks.
+    """
+    if not filenames or max_related <= 0 or max_hops <= 0:
+        return None
 
-        # Explore files that import this file (reverse edges)
-        for importer_file in reverse_graph.get(current_file, []):
-            if importer_file not in visited:
-                visited.add(importer_file)
-                queue.append((importer_file, distance + 1, current_file, "imported_by"))
+    schema_name = sanitize_repo_name(repo_name)
+    cache_table = sql.Identifier(schema_name, "graph_cache")
 
-    return results[:max_results]
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables
+                        WHERE table_schema = %s AND table_name = 'graph_cache'
+                    )
+                    """,
+                    (schema_name,),
+                )
+                if not cur.fetchone()[0]:
+                    return None
+
+                visited = set(filenames)
+                frontier = list(filenames)
+                relations: list[FileRelation] = []
+
+                for distance in range(max_hops):
+                    if not frontier or len(relations) >= max_related:
+                        break
+
+                    cur.execute(
+                        sql.SQL(
+                            """
+                            SELECT filename, imports, imported_by
+                            FROM {table}
+                            WHERE filename = ANY(%s)
+                            """
+                        ).format(table=cache_table),
+                        (frontier,),
+                    )
+                    rows = cur.fetchall()
+
+                    neighbors: dict[str, tuple[list[str], list[str]]] = {}
+                    for filename, imports, imported_by in rows:
+                        if isinstance(imports, str):
+                            try:
+                                imports = json.loads(imports)
+                            except Exception:
+                                imports = []
+                        if isinstance(imported_by, str):
+                            try:
+                                imported_by = json.loads(imported_by)
+                            except Exception:
+                                imported_by = []
+
+                        imp_list = imports if isinstance(imports, list) else []
+                        by_list = imported_by if isinstance(imported_by, list) else []
+                        neighbors[filename] = (imp_list, by_list)
+
+                    next_frontier: list[str] = []
+                    hop_distance = distance + 1
+
+                    for source_file in frontier:
+                        imports, imported_by = neighbors.get(source_file, ([], []))
+
+                        for target_file in imports:
+                            if target_file == source_file or target_file in visited:
+                                continue
+                            visited.add(target_file)
+                            relations.append(
+                                FileRelation(
+                                    source_file=source_file,
+                                    target_file=target_file,
+                                    relation_type="imports",
+                                    hop_distance=hop_distance,
+                                )
+                            )
+                            if len(relations) >= max_related:
+                                break
+                            next_frontier.append(target_file)
+
+                        if len(relations) >= max_related:
+                            break
+
+                        for target_file in imported_by:
+                            if target_file == source_file or target_file in visited:
+                                continue
+                            visited.add(target_file)
+                            relations.append(
+                                FileRelation(
+                                    source_file=source_file,
+                                    target_file=target_file,
+                                    relation_type="imported_by",
+                                    hop_distance=hop_distance,
+                                )
+                            )
+                            if len(relations) >= max_related:
+                                break
+                            next_frontier.append(target_file)
+
+                        if len(relations) >= max_related:
+                            break
+
+                    frontier = next_frontier
+
+                return relations[:max_related]
+
+    except Exception as e:
+        logger.debug(f"Graph cache traversal failed for {repo_name}: {e}")
+        return None
 
 
 def get_related_files(
@@ -348,23 +392,26 @@ def get_related_files(
     if max_related is None:
         max_related = settings.max_graph_results
 
+    cached = _get_related_files_from_graph_cache(
+        repo_name,
+        filenames,
+        max_related=max_related,
+        max_hops=max_hops,
+    )
+    if cached is not None:
+        return cached
+
     try:
         import_graph = build_import_graph(repo_name)
     except Exception as e:
         logger.warning(f"Failed to build import graph: {e}")
         return []
 
-    # Build reverse graph (imported_by)
-    reverse_graph: dict[str, list[str]] = defaultdict(list)
-    for source, targets in import_graph.items():
-        for target in targets:
-            reverse_graph[target].append(source)
-
     # Perform multi-hop BFS traversal
     traversal_results = multi_hop_traversal(
         start_files=filenames,
         import_graph=import_graph,
-        reverse_graph=reverse_graph,
+        reverse_graph={},
         max_hops=max_hops,
         max_results=max_related,
     )

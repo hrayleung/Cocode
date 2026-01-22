@@ -24,6 +24,14 @@ class EmbeddingProvider(Protocol):
         ...
 
 
+# Model registry for reference (dimensions used by settings.embedding_dimensions)
+MODEL_DIMENSIONS: dict[str, dict[str, int]] = {
+    "openai": {"text-embedding-3-large": 3072, "text-embedding-3-small": 1536, "text-embedding-ada-002": 1536},
+    "jina": {"jina-embeddings-v3": 1024, "jina-embeddings-v2-base-code": 768},
+    "mistral": {"codestral-embed": 1024},
+}
+
+
 class OpenAIProvider:
     """OpenAI text-embedding-3-large provider."""
 

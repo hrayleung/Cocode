@@ -60,3 +60,11 @@ Thumbs.db
 comparison_results.json
 cocode.log
 .claude/
+
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+CLAUDE.md

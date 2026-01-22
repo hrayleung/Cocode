@@ -5,14 +5,6 @@ from src.parser.ast_parser import (
     extract_imports_ast,
     is_language_supported,
     get_language_from_file,
-    TREE_SITTER_AVAILABLE,
-)
-
-
-# Skip all tests if Tree-sitter is not available
-pytestmark = pytest.mark.skipif(
-    not TREE_SITTER_AVAILABLE,
-    reason="Tree-sitter not available"
 )
 
 
@@ -381,14 +373,13 @@ class TestLanguageSupport:
 
     def test_supported_languages(self):
         """Test that main languages are supported."""
-        if TREE_SITTER_AVAILABLE:
-            assert is_language_supported("python")
-            assert is_language_supported("go")
-            assert is_language_supported("rust")
-            assert is_language_supported("c")
-            assert is_language_supported("cpp")
-            assert is_language_supported("javascript")
-            assert is_language_supported("typescript")
+        assert is_language_supported("python")
+        assert is_language_supported("go")
+        assert is_language_supported("rust")
+        assert is_language_supported("c")
+        assert is_language_supported("cpp")
+        assert is_language_supported("javascript")
+        assert is_language_supported("typescript")
 
     def test_unsupported_language(self):
         """Test unsupported language."""

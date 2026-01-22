@@ -18,10 +18,8 @@ logger = logging.getLogger(__name__)
 MIN_SCORE_RATIO = 0.4
 FULL_CODE_COUNT = 3
 MAX_CHUNKS_PER_FILE = 3
-
-# Cache size limits to prevent memory exhaustion
-MAX_FILE_CACHE_SIZE = 100  # Maximum number of files to cache in memory
-MAX_NEWLINE_CACHE_SIZE = 100  # Maximum number of newline index arrays to cache
+MAX_FILE_CACHE_SIZE = 100
+MAX_NEWLINE_CACHE_SIZE = 100
 
 SIGNATURE_KEYWORDS = (
     "def ", "async def ", "class ", "function ", "const ", "let ",
@@ -76,10 +74,17 @@ def parse_location(loc_str: str) -> str:
     if match:
         start, end = int(match.group(1)), int(match.group(2))
         start_line, end_line = start // 40 + 1, end // 40
-        prefix = "~L"
-        return f"{prefix}{start_line}-{end_line}" if end_line > start_line else f"{prefix}{start_line}"
+        return f"~L{start_line}-{end_line}" if end_line > start_line else f"~L{start_line}"
 
     return loc
+
+
+def _evict_oldest(cache: dict, max_size: int, name: str) -> None:
+    """Evict oldest entry from cache if at capacity."""
+    if len(cache) >= max_size:
+        first_key = next(iter(cache))
+        del cache[first_key]
+        logger.debug(f"Evicted {name} cache entry for {first_key}")
 
 
 def location_to_lines(
@@ -89,10 +94,7 @@ def location_to_lines(
     file_cache: dict[str, bytes],
     newline_cache: dict[str, list[int]],
 ) -> str:
-    """Convert a location string into 1-indexed line ranges.
-
-    Uses bounded caches to prevent memory exhaustion.
-    """
+    """Convert a location string into 1-indexed line ranges."""
     loc = str(loc_str)
 
     # Symbol format
@@ -111,19 +113,9 @@ def location_to_lines(
     # Get or compute newline positions
     if filename not in newline_cache:
         try:
-            # Cache size limit enforcement for newline cache
-            if len(newline_cache) >= MAX_NEWLINE_CACHE_SIZE:
-                # Remove oldest entry (simple FIFO eviction)
-                first_key = next(iter(newline_cache))
-                del newline_cache[first_key]
-                logger.debug(f"Evicted newline cache entry for {first_key}")
-
+            _evict_oldest(newline_cache, MAX_NEWLINE_CACHE_SIZE, "newline")
             if filename not in file_cache:
-                # Cache size limit enforcement for file cache
-                if len(file_cache) >= MAX_FILE_CACHE_SIZE:
-                    first_key = next(iter(file_cache))
-                    del file_cache[first_key]
-                    logger.debug(f"Evicted file cache entry for {first_key}")
+                _evict_oldest(file_cache, MAX_FILE_CACHE_SIZE, "file")
                 file_cache[filename] = (Path(repo_path) / filename).read_bytes()
             newline_cache[filename] = [i for i, b in enumerate(file_cache[filename]) if b == 10]
         except Exception:
@@ -177,14 +169,14 @@ class SearchService:
                 repo_name=repo_name,
                 query=query.strip(),
                 top_k=top_k * 3,
-                use_reranker=bool(settings.cohere_api_key),
+                use_reranker=bool(settings.cohere_api_key) and bool(settings.enable_reranker),
             )
             if not results:
                 return []
 
             repo_path = self._get_repo_path(repo_name)
             filtered = self._filter_by_score(results, top_k)
-            file_results = self._aggregate_tiered(filtered, top_k, full_code_count, repo_path)
+            file_results = self._aggregate_results(filtered, top_k, full_code_count, repo_path)
 
             if expand_related and file_results:
                 self._add_related_files(repo_name, file_results, max_related)
@@ -229,7 +221,7 @@ class SearchService:
         except Exception as e:
             logger.debug(f"Graph expansion failed: {e}")
 
-    def _aggregate_tiered(
+    def _aggregate_results(
         self,
         results: list,
         top_k: int,
@@ -239,30 +231,30 @@ class SearchService:
         """Aggregate results with tiered presentation."""
         from src.retrieval.file_categorizer import categorize_file
 
-        file_chunks: dict[str, list] = {}
-        file_scores: dict[str, float] = {}
+        # Group chunks by file
+        file_chunks: dict[str, list] = defaultdict(list)
+        file_scores: dict[str, float] = defaultdict(float)
         file_categories: dict[str, str] = {}
 
         for r in results:
-            if r.filename not in file_chunks:
-                file_chunks[r.filename] = []
-                file_scores[r.filename] = 0.0
-                file_categories[r.filename] = categorize_file(r.filename)
             file_chunks[r.filename].append(r)
             file_scores[r.filename] = max(file_scores[r.filename], r.score)
+            if r.filename not in file_categories:
+                file_categories[r.filename] = categorize_file(r.filename)
 
-        selected = self._mmr_diversify(
-            sorted(file_chunks, key=lambda f: file_scores[f], reverse=True),
-            file_scores, file_categories, top_k, settings.diversity_lambda
-        )
+        # Select diverse files
+        candidates = sorted(file_chunks, key=lambda f: file_scores[f], reverse=True)
+        selected = self._mmr_diversify(candidates, file_scores, file_categories, top_k, settings.diversity_lambda)
 
+        # Build snippets
         file_cache: dict[str, bytes] = {}
         newline_cache: dict[str, list[int]] = {}
 
         return [
-            self._build_full_snippet(f, file_chunks[f], file_scores[f], repo_path, file_cache, newline_cache)
-            if i < full_code_count else
-            self._build_reference_snippet(f, file_chunks[f], file_scores[f], repo_path, file_cache, newline_cache)
+            self._build_snippet(
+                f, file_chunks[f], file_scores[f], repo_path, file_cache, newline_cache,
+                full=(i < full_code_count)
+            )
             for i, f in enumerate(selected)
         ]
 
@@ -297,9 +289,29 @@ class SearchService:
 
         return selected
 
+    def _build_snippet(
+        self,
+        filename: str,
+        chunks: list,
+        score: float,
+        repo_path: str | None,
+        file_cache: dict[str, bytes],
+        newline_cache: dict[str, list[int]],
+        full: bool,
+    ) -> CodeSnippet:
+        """Build a code snippet (full or reference) for a file."""
+        if full:
+            return self._build_full_snippet(filename, chunks, score, repo_path, file_cache, newline_cache)
+        return self._build_reference_snippet(filename, chunks, score, repo_path, file_cache, newline_cache)
+
     def _build_full_snippet(
-        self, filename: str, chunks: list, score: float, repo_path: str | None,
-        file_cache: dict[str, bytes], newline_cache: dict[str, list[int]],
+        self,
+        filename: str,
+        chunks: list,
+        score: float,
+        repo_path: str | None,
+        file_cache: dict[str, bytes],
+        newline_cache: dict[str, list[int]],
     ) -> CodeSnippet:
         """Build full code snippet for top results."""
         top_chunks = sorted(chunks, key=lambda c: c.score, reverse=True)[:MAX_CHUNKS_PER_FILE]
@@ -317,8 +329,13 @@ class SearchService:
         return CodeSnippet(filename=filename, content="\n\n".join(content_parts), score=score, locations=locations)
 
     def _build_reference_snippet(
-        self, filename: str, chunks: list, score: float, repo_path: str | None,
-        file_cache: dict[str, bytes], newline_cache: dict[str, list[int]],
+        self,
+        filename: str,
+        chunks: list,
+        score: float,
+        repo_path: str | None,
+        file_cache: dict[str, bytes],
+        newline_cache: dict[str, list[int]],
     ) -> CodeSnippet:
         """Build compact reference for lower-relevance results."""
         best = max(chunks, key=lambda c: c.score)
@@ -327,8 +344,11 @@ class SearchService:
             for loc in sorted(set(str(c.location) for c in chunks if c.location))[:3]
         ]
         return CodeSnippet(
-            filename=filename, content=extract_signature(best.content),
-            score=score, locations=locations, is_reference_only=True
+            filename=filename,
+            content=extract_signature(best.content),
+            score=score,
+            locations=locations,
+            is_reference_only=True,
         )
 
 

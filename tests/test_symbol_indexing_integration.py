@@ -112,10 +112,11 @@ class TestSymbolIndexingUnit:
         mock_conn.return_value = mock_conn_instance
 
         # Run indexing
-        count = index_file_symbols("test_repo", "test.py", "def test_func(): pass", mock_embed)
+        count, success = index_file_symbols("test_repo", "test.py", "def test_func(): pass", mock_embed)
 
         # Verify
         assert count == 1
+        assert success is True
         mock_extract.assert_called_once()
         mock_embed.get_embeddings_batch.assert_called_once()
         mock_cursor.execute.assert_called_once()
@@ -145,9 +146,10 @@ class TestSymbolIndexingUnit:
         """Test indexing when no symbols are found."""
         mock_extract.return_value = []
 
-        count = index_file_symbols("test_repo", "empty.py", "# Just a comment")
+        count, success = index_file_symbols("test_repo", "empty.py", "# Just a comment")
 
         assert count == 0
+        assert success is True
         mock_extract.assert_called_once()
 
     @patch("src.indexer.symbol_indexing.extract_symbols")
@@ -156,9 +158,10 @@ class TestSymbolIndexingUnit:
         """Test indexing with unknown language."""
         mock_lang.return_value = None
 
-        count = index_file_symbols("test_repo", "unknown.xyz", "content")
+        count, success = index_file_symbols("test_repo", "unknown.xyz", "content")
 
         assert count == 0
+        assert success is True
         mock_extract.assert_not_called()
 
 
@@ -206,8 +209,9 @@ class TestIncrementalIndexing:
 
         # Then: index new symbols
         mock_extract.return_value = new_symbols
-        count = index_file_symbols("test_repo", "changed.py", "new content", mock_embed)
+        count, success = index_file_symbols("test_repo", "changed.py", "new content", mock_embed)
         assert count == 3
+        assert success is True
 
     @patch("src.indexer.symbol_indexing.get_connection")
     @patch("src.indexer.symbol_indexing.get_provider")
@@ -244,9 +248,10 @@ class TestIncrementalIndexing:
         mock_conn.return_value = mock_conn_instance
 
         # Index (will upsert due to unique constraint)
-        count = index_file_symbols("test_repo", "file.py", "content", mock_embed)
+        count, success = index_file_symbols("test_repo", "file.py", "content", mock_embed)
 
         assert count == 1
+        assert success is True
         # Verify INSERT ... ON CONFLICT DO UPDATE was called
         call_args = mock_cursor.execute.call_args
         assert call_args is not None
@@ -303,7 +308,7 @@ class TestBatchProcessing:
         mock_repo_path.glob.return_value = [mock_file1, mock_file2]
         mock_path.return_value = mock_repo_path
 
-        mock_index.return_value = 5
+        mock_index.return_value = (5, True)
 
         with patch("src.indexer.symbol_indexing.settings") as mock_settings:
             mock_settings.enable_symbol_indexing = True
