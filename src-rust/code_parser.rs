@@ -43,12 +43,24 @@ fn strip_quotes(s: &str) -> String {
     let t = s.trim();
     t.trim_matches(['"', '\''].as_ref()).to_string()
 }
-
 fn strip_python_string_quotes(s: &str) -> String {
     let t = s.trim();
 
+    // Tree-sitter Python string nodes can include an optional prefix like r/u/f/b (and combinations like fr/rf).
+    // Strip it if present so docstrings don't keep the prefix.
+    let t = if let Some(idx) = t.find('"').or_else(|| t.find('\'')) {
+        let (prefix, rest) = t.split_at(idx);
+        if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_alphabetic()) {
+            rest
+        } else {
+            t
+        }
+    } else {
+        t
+    };
+
     // Handle triple-quoted strings first.
-    for q in ["\"\"\"", "'''"].iter() {
+    for q in ["\"\"\"", "'''"] .iter() {
         if t.starts_with(q) && t.ends_with(q) && t.len() >= q.len() * 2 {
             return t[q.len()..t.len() - q.len()].to_string();
         }
@@ -58,8 +70,10 @@ fn strip_python_string_quotes(s: &str) -> String {
 }
 
 fn is_test_file(filename: &str) -> bool {
-    let lower = filename.to_lowercase();
-    let stem = std::path::Path::new(filename)
+    // Normalize path separators so Windows paths are treated consistently.
+    let normalized = filename.replace('\\', "/");
+    let lower = normalized.to_lowercase();
+    let stem = std::path::Path::new(&normalized)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("")

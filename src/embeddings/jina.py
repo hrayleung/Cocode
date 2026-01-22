@@ -55,7 +55,6 @@ def get_embeddings_late_chunking(chunks: list[str], task: str = "retrieval.passa
     """Get embeddings using late chunking (preserves cross-chunk context)."""
     if not chunks:
         return []
-    _validate_texts(chunks, "Chunk")
 
     total_chars = sum(len(c) for c in chunks)
     if total_chars > JINA_LATE_CHUNKING_CHAR_LIMIT:
@@ -63,6 +62,8 @@ def get_embeddings_late_chunking(chunks: list[str], task: str = "retrieval.passa
             f"Batch text length ({total_chars} chars) exceeds late_chunking limit "
             f"({JINA_LATE_CHUNKING_CHAR_LIMIT} chars). Pass shorter texts or disable late chunking."
         )
+
+    _validate_texts(chunks, "Chunk")
 
     data = _make_request({
         "model": settings.jina_model,

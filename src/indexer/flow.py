@@ -20,7 +20,8 @@ def _normalize_cocoindex_globset_patterns(patterns: list[str]) -> list[str]:
 
     Notes:
     - CocoIndex uses Rust's globset (not gitignore).
-    - Directory patterns like ".venv/" won't exclude files under it; convert to ".venv/**".
+    - Globset patterns match the *full path*, so gitignore patterns without slashes need a "**/" prefix
+      to match at any directory depth.
     - Negations ("!") are ignored.
     - Leading slashes are stripped (CocoIndex paths are relative).
     """
@@ -37,10 +38,24 @@ def _normalize_cocoindex_globset_patterns(patterns: list[str]) -> list[str]:
                 p,
             )
             continue
-        if p.startswith("/"):
+
+        anchored = p.startswith("/")
+        if anchored:
             p = p[1:]
-        if p.endswith("/"):
-            p = p + "**"
+
+        is_dir = p.endswith("/")
+        body = p.rstrip("/")
+
+        # Gitignore patterns without slashes match at any depth.
+        if ("/" not in body) and not anchored:
+            p = f"**/{body}"
+        else:
+            p = body
+
+        # Directory patterns should match everything under the directory.
+        if is_dir:
+            p = p + "/**"
+
         out.append(p)
     return out
 
