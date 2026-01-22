@@ -6,7 +6,6 @@ on every search operation.
 
 import json
 import logging
-from typing import Optional
 
 from psycopg import sql
 
@@ -88,7 +87,7 @@ def populate_graph_cache(repo_name: str, import_graph: dict[str, list[str]]) -> 
     return entries_created
 
 
-def get_cached_import_graph(repo_name: str) -> Optional[tuple[dict[str, list[str]], dict[str, list[str]]]]:
+def get_cached_import_graph(repo_name: str) -> tuple[dict[str, list[str]], dict[str, list[str]]] | None:
     """Retrieve cached import graph.
 
     Args:
