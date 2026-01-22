@@ -3,6 +3,7 @@
 import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 import cocoindex
@@ -12,6 +13,47 @@ import httpx
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_cocoindex_globset_patterns(patterns: list[str]) -> list[str]:
+    """Normalize patterns to the globset syntax used by CocoIndex sources.
+
+    Notes:
+    - CocoIndex uses Rust's globset (not gitignore).
+    - Directory patterns like ".venv/" won't exclude files under it; convert to ".venv/**".
+    - Negations ("!") are ignored.
+    - Leading slashes are stripped (CocoIndex paths are relative).
+    """
+
+    out: list[str] = []
+    for raw in patterns:
+        p = (raw or "").strip()
+        if not p or p.startswith("#"):
+            continue
+        if p.startswith("!"):
+            # globset doesn't support gitignore negation; ignore these.
+            logger.warning(
+                "Ignoring gitignore negation pattern %r because CocoIndex globset doesn't support '!'",
+                p,
+            )
+            continue
+        if p.startswith("/"):
+            p = p[1:]
+        if p.endswith("/"):
+            p = p + "**"
+        out.append(p)
+    return out
+
+
+def _read_gitignore_patterns(repo_path: str) -> list[str]:
+    gitignore_path = Path(repo_path) / ".gitignore"
+    if not gitignore_path.exists():
+        return []
+    try:
+        return gitignore_path.read_text().splitlines()
+    except (OSError, UnicodeDecodeError) as e:
+        logger.debug(f"Could not read .gitignore: {e}")
+        return []
 
 
 class JinaEmbedSpec(cocoindex.op.FunctionSpec):
@@ -226,8 +268,16 @@ def create_indexing_flow(
 
     if included_patterns is None:
         included_patterns = [f"**/*{ext}" for ext in settings.included_extensions]
+
+    gitignore_patterns = _read_gitignore_patterns(repo_path)
+
     if excluded_patterns is None:
         excluded_patterns = settings.excluded_patterns
+
+    # Combine configured patterns with .gitignore, then normalize for CocoIndex.
+    excluded_patterns = _normalize_cocoindex_globset_patterns(
+        list(excluded_patterns) + gitignore_patterns
+    )
 
     included_key = tuple(included_patterns)
     excluded_key = tuple(excluded_patterns)

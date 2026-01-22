@@ -70,30 +70,47 @@ def _normalize_weights(weights: list[float] | None, n: int) -> list[float]:
     return [w / total for w in weights]
 
 
+def _symbol_key(hit: SymbolMatch) -> str:
+    """Build a stable key for RRF fusion."""
+    return f"{hit.filename}:{hit.symbol_name}:{hit.symbol_type}:{hit.line_start}:{hit.line_end}"
+
+
 def reciprocal_rank_fusion_symbols(
     result_lists: list[list[SymbolMatch]],
     *,
     k: int = 40,
     weights: list[float] | None = None,
 ) -> list[SymbolMatch]:
-    """Fuse multiple ranked symbol lists using Reciprocal Rank Fusion."""
+    """Fuse multiple ranked symbol lists using Rust-accelerated RRF."""
 
     if not result_lists:
         return []
 
-    weights = _normalize_weights(weights, len(result_lists))
+    from src.rust_bridge import reciprocal_rank_fusion_weighted
 
-    scores: dict[tuple, float] = defaultdict(float)
-    best: dict[tuple, SymbolMatch] = {}
+    norm_weights = _normalize_weights(weights, len(result_lists))
 
-    for weight, results in zip(weights, result_lists, strict=True):
-        for rank, hit in enumerate(results):
-            key = hit.key()
-            scores[key] += weight / (k + rank + 1)
+    ranked_lists: list[list[tuple[str, float]]] = []
+    best: dict[str, SymbolMatch] = {}
+
+    for results in result_lists:
+        out: list[tuple[str, float]] = []
+        for hit in results:
+            key = _symbol_key(hit)
+            out.append((key, float(hit.score)))
             if key not in best or hit.score > best[key].score:
                 best[key] = hit
+        ranked_lists.append(out)
 
-    fused = [replace(best[k], score=scores[k]) for k in sorted(scores, key=scores.get, reverse=True)]
+    fused_scores = reciprocal_rank_fusion_weighted(ranked_lists, norm_weights, k=float(k))
+
+    fused: list[SymbolMatch] = []
+    for key, fused_score in fused_scores:
+        rep = best.get(key)
+        if rep is None:
+            continue
+        fused.append(replace(rep, score=float(fused_score)))
+
     return fused
 
 
@@ -275,24 +292,6 @@ def select_top_symbols(
     return selected
 
 
-def _safe_resolve_file(repo_root: Path, filename: str) -> Path:
-    rel = Path(filename)
-    if rel.is_absolute():
-        raise ValueError("absolute paths are not allowed")
-    resolved = (repo_root / rel).resolve(strict=False)
-    try:
-        if not resolved.is_relative_to(repo_root):
-            raise ValueError("file escapes repo root")
-    except AttributeError:
-        # Python < 3.9
-        try:
-            resolved.relative_to(repo_root)
-        except ValueError:
-            raise ValueError("file escapes repo root")
-
-    return resolved
-
-
 def extract_symbol_code(
     *,
     repo_path: str | Path,
@@ -308,62 +307,16 @@ def extract_symbol_code(
     - extracted_line_start / extracted_line_end
     - file_line_count
     - truncated
+
+    This function intentionally does not fall back to Python.
     """
 
-    repo_root = Path(repo_path).resolve(strict=False)
-    file_path = _safe_resolve_file(repo_root, filename)
+    from src.rust_bridge import extract_code_by_line_range
 
-    try:
-        text = file_path.read_text(encoding="utf-8", errors="replace")
-    except OSError as e:
-        raise FileNotFoundError(f"cannot read file: {filename}") from e
-
-    lines = text.splitlines(keepends=True)
-    line_count = len(lines)
-
-    if line_start < 1:
-        raise ValueError("line_start must be >= 1")
-    if line_end < line_start:
-        raise ValueError("line_end must be >= line_start")
-    if line_start > max(line_count, 1):
-        raise ValueError(f"line_start beyond end of file ({line_count} lines)")
-
-    clamped_end = min(line_end, max(line_count, 1))
-    slice_lines = lines[line_start - 1:clamped_end]
-
-    if max_code_chars is None:
-        extracted_end = line_start + len(slice_lines) - 1 if slice_lines else line_start - 1
-        return {
-            "code": "".join(slice_lines),
-            "extracted_line_start": line_start,
-            "extracted_line_end": extracted_end,
-            "file_line_count": line_count,
-            "truncated": clamped_end < line_end,
-        }
-
-    out: list[str] = []
-    total = 0
-    truncated = False
-    extracted_end = line_start - 1
-
-    for i, line in enumerate(slice_lines, start=line_start):
-        if total + len(line) > max_code_chars:
-            if not out:
-                # Single very long line; truncate at char boundary.
-                out.append(line[:max_code_chars])
-                extracted_end = i
-                truncated = True
-            else:
-                truncated = True
-            break
-        out.append(line)
-        total += len(line)
-        extracted_end = i
-
-    return {
-        "code": "".join(out),
-        "extracted_line_start": line_start,
-        "extracted_line_end": extracted_end,
-        "file_line_count": line_count,
-        "truncated": truncated or (clamped_end < line_end),
-    }
+    return extract_code_by_line_range(
+        str(repo_path),
+        filename,
+        line_start,
+        line_end,
+        max_code_chars,
+    )

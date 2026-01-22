@@ -11,10 +11,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from pathspec import GitIgnoreSpec
 from psycopg import sql
 
 from config.settings import settings
-from cocode_rust import compute_file_hash as _compute_file_hash
+from src.rust_bridge import compute_file_hash as _compute_file_hash
 from src.embeddings.provider import get_provider
 from src.parser.ast_parser import get_language_from_file
 from src.parser.symbol_extractor import Symbol, extract_symbols
@@ -354,9 +355,33 @@ def index_file_symbols_incremental(
     return 0, False
 
 
-def _is_file_excluded(relative_path: Path, excluded_patterns: list[str]) -> bool:
+def _build_ignore_spec(repo_root: Path, excluded_patterns: list[str]) -> GitIgnoreSpec:
+    """Build ignore spec from .gitignore and configured patterns."""
+
+    patterns = list(excluded_patterns)
+
+    # Some unit tests mock Path(); avoid interacting with the filesystem in that case.
+    try:
+        gitignore_path = repo_root / ".gitignore"
+    except TypeError:
+        return GitIgnoreSpec.from_lines(patterns)
+
+    try:
+        if gitignore_path.exists():
+            patterns.extend(gitignore_path.read_text().splitlines())
+    except (OSError, UnicodeDecodeError) as e:
+        logger.debug(f"Could not read .gitignore: {e}")
+    except Exception:
+        # Defensive: ignore any other filesystem or mock-related errors.
+        return GitIgnoreSpec.from_lines(patterns)
+
+    return GitIgnoreSpec.from_lines(patterns)
+
+
+def _is_file_excluded(relative_path: str, ignore_spec: GitIgnoreSpec) -> bool:
     """Check if a file path matches any exclusion pattern."""
-    return any(relative_path.match(pattern) for pattern in excluded_patterns)
+
+    return bool(ignore_spec.match_file(relative_path))
 
 
 def index_repository_symbols(
@@ -396,12 +421,17 @@ def index_repository_symbols(
         excluded_patterns = settings.excluded_patterns
 
     repo_path_obj = Path(repo_path)
-    files_to_process = [
-        file_path
-        for pattern in included_patterns
-        for file_path in repo_path_obj.glob(pattern)
-        if file_path.is_file() and not _is_file_excluded(file_path.relative_to(repo_path_obj), excluded_patterns)
-    ]
+    ignore_spec = _build_ignore_spec(repo_path_obj, excluded_patterns)
+
+    files_to_process: list[Path] = []
+    for pattern in included_patterns:
+        for file_path in repo_path_obj.glob(pattern):
+            if not file_path.is_file():
+                continue
+            rel = str(file_path.relative_to(repo_path_obj))
+            if _is_file_excluded(rel, ignore_spec):
+                continue
+            files_to_process.append(file_path)
 
     if not files_to_process:
         logger.warning(f"No files found to process in {repo_path}")

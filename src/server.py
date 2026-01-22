@@ -13,7 +13,6 @@ from fastmcp import FastMCP
 from config.settings import settings
 from src.exceptions import IndexingError, PathError, SearchError
 from src.indexer.service import get_indexer
-from src.retrieval.curation import curate_code_sections
 from src.retrieval.dependencies import get_import_edges
 from src.retrieval.file_categorizer import categorize_file
 from src.retrieval.service import extract_signature, get_searcher
@@ -37,8 +36,9 @@ MAX_QUERY_LENGTH = 50_000
 mcp = FastMCP(
     "cocode",
     instructions=(
-        "Semantic code search. Call codebase_retrieval with your question - indexing is automatic. "
-        "Call codebase_retrieval_full to get key files, file dependencies, and full symbol implementations."
+        "Semantic code search. Call codebase_retrieval_full with your question - indexing is automatic. "
+        "It returns key files, file dependencies, and full symbol implementations. "
+        "Use clear_index(path) to force a re-index when needed."
     ),
 )
 
@@ -83,71 +83,6 @@ def _handle_search_error(e: Exception) -> dict:
         return {"error": "Search operation failed"}
     logger.exception(f"Unexpected error: {e}")
     return {"error": "An unexpected error occurred"}
-
-
-@mcp.tool()
-async def codebase_retrieval(
-    query: str,
-    path: str | None = None,
-    top_k: int = 10,
-    max_output_chars: int = 20_000,
-    max_files: int = 4,
-    max_sections: int = 8,
-    include_docs: bool = True,
-) -> list[dict]:
-    """Search a codebase and return curated code sections.
-
-    This tool is optimized for LLM consumption (similar to Augment's
-    codebase-retrieval): it returns a small set of contiguous code sections
-    under a global output budget.
-
-    Args:
-        query: Natural language question about the code
-        path: Path to the codebase (defaults to cwd)
-        top_k: Legacy compatibility (upper bound for file candidate pool; 1-100)
-        max_output_chars: Total character budget for returned code (default: 20,000)
-        max_files: Max distinct files to draw sections from (default: 4)
-        max_sections: Max number of sections to return (default: 8)
-        include_docs: Whether to include at most one documentation file section
-
-    Returns:
-        List of code sections with filename, line range and content
-    """
-    if err := _validate_query(query):
-        return [{"error": err}]
-    if err := _validate_top_k(top_k):
-        return [{"error": err}]
-
-    path = path or os.getcwd()
-
-    try:
-        indexer = get_indexer()
-        index_result = indexer.ensure_indexed(path)
-
-        logger.info(f"Index: {index_result.status} ({index_result.file_count} files, {index_result.chunk_count} chunks)")
-
-        if index_result.chunk_count == 0:
-            return [{"error": f"No code files found in {path}"}]
-
-        sections = curate_code_sections(
-            repo_name=index_result.repo_name,
-            repo_path=path,
-            query=query.strip(),
-            max_output_chars=max_output_chars,
-            max_files=min(max_files, top_k),
-            max_sections=max_sections,
-            include_docs=include_docs,
-        )
-
-        logger.info(f"Curated retrieval returned {len(sections)} sections")
-
-        if not sections:
-            return [{"message": "No matching code found", "query": query.strip()}]
-
-        return sections
-
-    except Exception as e:
-        return [_handle_search_error(e)]
 
 
 @mcp.tool()

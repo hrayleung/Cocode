@@ -15,7 +15,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable
 
-from cocode_rust import jaccard_similarity
 from config.settings import settings
 from src.embeddings import get_provider, OpenAIProvider
 from src.exceptions import SearchError
@@ -177,39 +176,19 @@ def _normalize_rrf_weights(weights: list[float] | None, n: int) -> list[float]:
     return [w / total for w in weights] if total > 0 else [1.0 / n] * n
 
 
-def _content_overlap(content1: str, content2: str) -> float:
-    """Calculate content overlap ratio using token Jaccard similarity (Rust)."""
-    return jaccard_similarity(content1.lower(), content2.lower())
-
-
 def _apply_diversity_filter(results: list[SearchResult], target_count: int) -> list[SearchResult]:
     """Apply MMR-style diversity filtering to reduce semantic clustering."""
     if len(results) <= target_count:
         return results
-    
-    selected: list[SearchResult] = []
-    remaining = list(results)
-    
-    if remaining:
-        selected.append(remaining.pop(0))
-    
-    while len(selected) < target_count and remaining:
-        best_idx, best_score = 0, -1.0
-        
-        for i, candidate in enumerate(remaining):
-            max_overlap = max(
-                (_content_overlap(candidate.content, sel.content) for sel in selected),
-                default=0.0
-            )
-            # MMR: lambda=0.7 for relevance, 0.3 for diversity
-            mmr_score = 0.7 * candidate.score + 0.3 * (1.0 - max_overlap)
-            
-            if mmr_score > best_score:
-                best_score, best_idx = mmr_score, i
-        
-        selected.append(remaining.pop(best_idx))
-    
-    return selected
+
+    from src.rust_bridge import mmr_select_indices
+
+    scores = [float(r.score) for r in results]
+    contents = [r.content.lower() for r in results]
+    idxs = mmr_select_indices(scores, contents, target_count, lambda_param=0.7)
+
+    # Preserve selection order returned by Rust.
+    return [results[i] for i in idxs if 0 <= i < len(results)]
 
 
 def reciprocal_rank_fusion(

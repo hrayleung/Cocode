@@ -214,6 +214,127 @@ pub fn bfs_expansion(
     Ok(hop_distances)
 }
 
+/// Multi-hop BFS traversal that returns predecessor edges in BFS tree order.
+///
+/// This is designed for graph expansion in Python where we want concrete edges:
+/// (source_file, target_file, relation_type, hop_distance).
+///
+/// relation_type is:
+/// - "imports" when traversing a forward edge (source -> target)
+/// - "imported_by" when traversing a reverse edge (target <- source)
+#[pyfunction]
+#[pyo3(signature = (edges, start_nodes, max_hops=3, max_results=30, bidirectional=true))]
+pub fn bfs_traversal_edges(
+    edges: Vec<(String, String)>,
+    start_nodes: Vec<String>,
+    max_hops: usize,
+    max_results: usize,
+    bidirectional: bool,
+) -> PyResult<Vec<(String, String, String, usize)>> {
+    if edges.is_empty() || start_nodes.is_empty() || max_results == 0 || max_hops == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Build adjacency lists.
+    let mut forward_edges: AHashMap<String, Vec<String>> = AHashMap::new();
+    let mut backward_edges: AHashMap<String, Vec<String>> = AHashMap::new();
+
+    for (source, target) in edges {
+        forward_edges
+            .entry(source.clone())
+            .or_insert_with(Vec::new)
+            .push(target.clone());
+
+        if bidirectional {
+            backward_edges
+                .entry(target)
+                .or_insert_with(Vec::new)
+                .push(source);
+        }
+    }
+
+    // Sort neighbors for deterministic traversal.
+    for neighbors in forward_edges.values_mut() {
+        neighbors.sort();
+    }
+    for neighbors in backward_edges.values_mut() {
+        neighbors.sort();
+    }
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<(String, usize, Option<String>, Option<String>)> = VecDeque::new();
+    let mut results: Vec<(String, String, String, usize)> = Vec::new();
+
+    // Seed BFS.
+    for node in start_nodes {
+        if visited.insert(node.clone()) {
+            queue.push_back((node, 0, None, None));
+        }
+    }
+    let start_count = visited.len();
+
+    while let Some((current, hop, parent, relation)) = queue.pop_front() {
+        if results.len() >= max_results {
+            break;
+        }
+
+        if let (Some(p), Some(rel)) = (parent, relation) {
+            results.push((p, current.clone(), rel, hop));
+            if results.len() >= max_results {
+                break;
+            }
+        }
+
+        if hop >= max_hops {
+            continue;
+        }
+
+        let next_hop = hop + 1;
+
+        // Forward traversal: current imports neighbor.
+        if let Some(neighbors) = forward_edges.get(&current) {
+            for neighbor in neighbors {
+                if results.len() >= max_results
+                    || visited.len().saturating_sub(start_count) >= max_results
+                {
+                    break;
+                }
+                if visited.insert(neighbor.clone()) {
+                    queue.push_back((
+                        neighbor.clone(),
+                        next_hop,
+                        Some(current.clone()),
+                        Some("imports".to_string()),
+                    ));
+                }
+            }
+        }
+
+        // Backward traversal: current is imported by neighbor.
+        if bidirectional {
+            if let Some(neighbors) = backward_edges.get(&current) {
+                for neighbor in neighbors {
+                    if results.len() >= max_results
+                        || visited.len().saturating_sub(start_count) >= max_results
+                    {
+                        break;
+                    }
+                    if visited.insert(neighbor.clone()) {
+                        queue.push_back((
+                            neighbor.clone(),
+                            next_hop,
+                            Some(current.clone()),
+                            Some("imported_by".to_string()),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(results)
+}
+
 /// Detect strongly connected components using Kosaraju's algorithm
 ///
 /// Args:
