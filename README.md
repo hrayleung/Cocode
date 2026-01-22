@@ -48,7 +48,25 @@ This combination enables fast, accurate semantic search that stays up-to-date as
 - PostgreSQL with `pgvector` (`vector`) extension (the server will also attempt to enable `pgcrypto` for UUIDs)
 - API key for at least one embedding provider
 
-### Setup
+### Quick Install (Recommended)
+
+Install from PyPI using `pip`, `uvx`, or `pipx`:
+
+```bash
+# Using pip
+pip install cocode-mcp
+
+# Or using uvx (isolated environment, no global install)
+uvx cocode-mcp
+
+# Or using pipx (isolated environment with global command)
+pipx install cocode-mcp
+
+# Verify installation
+cocode --help
+```
+
+### From Source
 
 #### Standard Installation
 
@@ -57,6 +75,9 @@ This combination enables fast, accurate semantic search that stays up-to-date as
 git clone https://github.com/hrayleung/Cocode.git
 cd Cocode
 pip install -e ".[dev]"
+
+# Build Rust extensions
+maturin develop --release
 
 # Create .env file
 cp .env.example .env

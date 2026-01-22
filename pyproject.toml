@@ -1,8 +1,26 @@
 [project]
-name = "cocode"
+name = "cocode-mcp"
 version = "0.1.0"
-description = "High-performance MCP server for codebase indexing and retrieval"
+description = "High-performance MCP server for semantic codebase search with hybrid retrieval (vector + BM25 + symbol search)"
+readme = "README.md"
 requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "hrayleung", email = "hrayleung@users.noreply.github.com"}
+]
+keywords = ["mcp", "model-context-protocol", "code-search", "semantic-search", "codebase-indexing", "vector-search", "bm25"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "fastmcp>=2.0",
     "cocoindex",
@@ -21,6 +39,11 @@ dependencies = [
     "tree-sitter-javascript>=0.21.0",
     "tree-sitter-typescript>=0.21.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/hrayleung/Cocode"
+Repository = "https://github.com/hrayleung/Cocode"
+Issues = "https://github.com/hrayleung/Cocode/issues"
 
 [project.optional-dependencies]
 dev = [
