@@ -57,7 +57,7 @@ Install from PyPI using `pip`, `uvx`, or `pipx`:
 pip install cocode-mcp
 
 # Or using uvx (isolated environment, no global install)
-uvx cocode-mcp
+uvx --from cocode-mcp cocode
 
 # Or using pipx (isolated environment with global command)
 pipx install cocode-mcp

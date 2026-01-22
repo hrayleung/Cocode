@@ -23,7 +23,7 @@ classifiers = [
 ]
 dependencies = [
     "fastmcp>=2.0",
-    "cocoindex",
+    "cocoindex>=0.3.0",
     "openai>=1.0",
     "cohere>=5.0",
     "httpx>=0.24",
