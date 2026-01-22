@@ -47,6 +47,9 @@ This combination enables fast, accurate semantic search that stays up-to-date as
 - Python 3.10+
 - PostgreSQL with `pgvector` (`vector`) extension (the server will also attempt to enable `pgcrypto` for UUIDs)
 - API key for at least one embedding provider
+- **Rust toolchain** (only required for building from source):
+  - Install via [rustup](https://rustup.rs/): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+  - Includes `cargo` and the Rust compiler
 
 ### Quick Install (Recommended)
 
