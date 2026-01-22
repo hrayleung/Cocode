@@ -74,12 +74,12 @@ cocode --help
 #### Standard Installation
 
 ```bash
-# Clone and install
+# Clone the repository
 git clone https://github.com/hrayleung/Cocode.git
 cd Cocode
-pip install -e ".[dev]"
 
-# Build Rust extensions
+# Install dependencies and build Rust extensions (requires Rust toolchain)
+# This single command installs Python deps and builds the Rust extension in release mode
 maturin develop --release
 
 # Create .env file
