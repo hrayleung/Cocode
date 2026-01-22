@@ -34,16 +34,15 @@ def create_graph_cache_table(repo_name: str) -> None:
 
 
 def populate_graph_cache(repo_name: str, import_graph: dict[str, list[str]]) -> int:
-    """Populate graph cache from a complete import graph.
-
-    This is called after building the import graph during indexing.
-
-    Args:
-        repo_name: Repository name
-        import_graph: Forward import graph {filename: [imported_files]}
-
+    """
+    Populate the repository's graph_cache table from a complete forward import graph.
+    
+    Parameters:
+        repo_name (str): Repository name used to scope the cache table.
+        import_graph (dict[str, list[str]]): Mapping from filename to list of filenames it imports.
+    
     Returns:
-        Number of cache entries created/updated
+        int: Number of cache entries created or updated.
     """
     schema_name = sanitize_repo_name(repo_name)
     cache_table = sql.Identifier(schema_name, "graph_cache")
@@ -88,13 +87,14 @@ def populate_graph_cache(repo_name: str, import_graph: dict[str, list[str]]) -> 
 
 
 def get_cached_import_graph(repo_name: str) -> tuple[dict[str, list[str]], dict[str, list[str]]] | None:
-    """Retrieve cached import graph.
-
-    Args:
-        repo_name: Repository name
-
+    """
+    Load cached import and reverse-import graphs for a repository.
+    
+    Parameters:
+        repo_name (str): Repository name to locate the graph cache.
+    
     Returns:
-        Tuple of (import_graph, reverse_graph) or None if cache is empty/missing
+        tuple[dict[str, list[str]], dict[str, list[str]]] | None: A pair `(import_graph, reverse_graph)` where `import_graph` maps a filename to the list of filenames it imports and `reverse_graph` maps a filename to the list of filenames that import it; `None` if the cache table is missing, the cache is empty, or loading fails.
     """
     schema_name = sanitize_repo_name(repo_name)
     cache_table = sql.Identifier(schema_name, "graph_cache")
