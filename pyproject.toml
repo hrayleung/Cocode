@@ -1,6 +1,6 @@
 [project]
 name = "cocode-mcp"
-version = "0.1.1"
+version = "0.1.2"
 description = "High-performance MCP server for semantic codebase search with hybrid retrieval (vector + BM25 + symbol search)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -61,6 +61,6 @@ requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [tool.maturin]
-python-packages = ["src"]
+python-packages = ["src", "config"]
 module-name = "cocode_rust"
 features = ["pyo3/extension-module"]
