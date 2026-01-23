@@ -2,6 +2,7 @@
 
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -195,6 +196,7 @@ class CachedFlow:
 # Cache for open flows to avoid "already exists" errors.
 # If the repo_path/patterns change, we close + recreate the flow.
 _flow_cache: dict[str, CachedFlow] = {}
+_flow_cache_lock = threading.Lock()
 
 
 @cocoindex.op.function(behavior_version=1)
@@ -298,22 +300,23 @@ def create_indexing_flow(
     excluded_key = tuple(excluded_patterns)
 
     # Check cache for existing flow with matching configuration
-    cached = _flow_cache.get(flow_name)
-    if cached:
-        config_matches = (
-            cached.repo_path == repo_path
-            and cached.included_patterns == included_key
-            and cached.excluded_patterns == excluded_key
-        )
-        if config_matches:
-            return cached.flow
+    with _flow_cache_lock:
+        cached = _flow_cache.get(flow_name)
+        if cached:
+            config_matches = (
+                cached.repo_path == repo_path
+                and cached.included_patterns == included_key
+                and cached.excluded_patterns == excluded_key
+            )
+            if config_matches:
+                return cached.flow
 
-        # Configuration changed - close old flow before creating new one
-        try:
-            cached.flow.close()
-        except Exception as e:
-            logger.debug(f"Failed to close cached flow {flow_name}: {e}")
-        _flow_cache.pop(flow_name, None)
+            # Configuration changed - close old flow before creating new one
+            try:
+                cached.flow.close()
+            except Exception as e:
+                logger.debug(f"Failed to close cached flow {flow_name}: {e}")
+            _flow_cache.pop(flow_name, None)
 
     def code_indexing_flow(
         flow_builder: cocoindex.FlowBuilder,
@@ -400,12 +403,13 @@ def create_indexing_flow(
         )
 
     flow = cocoindex.open_flow(flow_name, code_indexing_flow)
-    _flow_cache[flow_name] = CachedFlow(
-        flow=flow,
-        repo_path=repo_path,
-        included_patterns=included_key,
-        excluded_patterns=excluded_key,
-    )
+    with _flow_cache_lock:
+        _flow_cache[flow_name] = CachedFlow(
+            flow=flow,
+            repo_path=repo_path,
+            included_patterns=included_key,
+            excluded_patterns=excluded_key,
+        )
     return flow
 
 
@@ -419,8 +423,9 @@ def get_cached_flow(repo_name: str):
         Cached flow object or None if not cached
     """
     flow_name = f"CodeIndex_{repo_name}"
-    cached = _flow_cache.get(flow_name)
-    return cached.flow if cached else None
+    with _flow_cache_lock:
+        cached = _flow_cache.get(flow_name)
+        return cached.flow if cached else None
 
 
 def clear_flow_cache(repo_name: str | None = None) -> None:
@@ -429,19 +434,20 @@ def clear_flow_cache(repo_name: str | None = None) -> None:
     Args:
         repo_name: If provided, clear only this repo's flow. Otherwise clear all.
     """
-    if repo_name:
-        flow_name = f"CodeIndex_{repo_name}"
-        cached = _flow_cache.pop(flow_name, None)
-        if cached:
+    with _flow_cache_lock:
+        if repo_name:
+            flow_name = f"CodeIndex_{repo_name}"
+            cached = _flow_cache.pop(flow_name, None)
+            if cached:
+                try:
+                    cached.flow.close()
+                except Exception as e:
+                    logger.debug(f"Failed to close flow {flow_name}: {e}")
+            return
+
+        for flow_name, cached in list(_flow_cache.items()):
             try:
                 cached.flow.close()
             except Exception as e:
                 logger.debug(f"Failed to close flow {flow_name}: {e}")
-        return
-
-    for flow_name, cached in list(_flow_cache.items()):
-        try:
-            cached.flow.close()
-        except Exception as e:
-            logger.debug(f"Failed to close flow {flow_name}: {e}")
-    _flow_cache.clear()
+        _flow_cache.clear()

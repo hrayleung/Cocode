@@ -10,6 +10,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 from psycopg import sql
+from psycopg.errors import UndefinedTable, InvalidSchemaName
 
 from src.storage.postgres import get_connection
 from src.storage.schema import sanitize_repo_name
@@ -165,7 +166,7 @@ def store_call_edge(repo_name: str, edge: CallEdge) -> bool:
     try:
         _insert()
         return True
-    except (UndefinedTable, UndefinedSchema) as e:
+    except (UndefinedTable, InvalidSchemaName) as e:
         # Fresh schema/table: create then retry once.
         logger.info(f"Edges table missing for {repo_name}, creating: {e}")
         try:
