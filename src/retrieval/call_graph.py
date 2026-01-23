@@ -7,6 +7,7 @@ This module provides functionality for:
 """
 
 import logging
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional
 from psycopg import sql
@@ -300,12 +301,12 @@ def trace_call_chain(
 
     chain = []
     visited = set([symbol_id])
-    queue = [(symbol_id, 0)]  # (symbol_id, depth)
+    queue = deque([(symbol_id, 0)])  # (symbol_id, depth)
 
     with get_connection() as conn:
         with conn.cursor() as cur:
             while queue:
-                current_id, depth = queue.pop(0)
+                current_id, depth = queue.popleft()
 
                 if depth >= max_depth:
                     continue

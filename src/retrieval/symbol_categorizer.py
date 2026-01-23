@@ -195,8 +195,10 @@ def detect_exported_symbols(code: str, language: str) -> set[str]:
 
         # export { foo, bar }
         for match in re.findall(r'export\s+\{([^}]+)\}', code):
-            names = [name.strip().split()[0] for name in match.split(',')]
-            exports.update(names)
+            for name in match.split(','):
+                parts = name.strip().split()
+                if parts:
+                    exports.add(parts[0])
 
     elif language == "rust":
         pattern = r'pub\s+(?:fn|struct|enum|trait)\s+(\w+)'
