@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 # In-memory cache of file hashes for incremental indexing
 _file_hash_cache: dict[str, dict[str, str]] = {}  # repo_name -> {filename -> hash}
 _file_hash_cache_lock = threading.Lock()
+_MAX_HASH_CACHE_PER_REPO = 50000  # Limit per-repo cache size
 
 
 def _get_cached_hash(repo_name: str, filename: str) -> str | None:
@@ -40,7 +41,15 @@ def _set_cached_hash(repo_name: str, filename: str, hash_val: str) -> None:
     with _file_hash_cache_lock:
         if repo_name not in _file_hash_cache:
             _file_hash_cache[repo_name] = {}
-        _file_hash_cache[repo_name][filename] = hash_val
+        repo_cache = _file_hash_cache[repo_name]
+        # Evict oldest entries if at capacity
+        if len(repo_cache) >= _MAX_HASH_CACHE_PER_REPO and filename not in repo_cache:
+            # Remove ~10% of entries (arbitrary selection since dict is unordered)
+            to_remove = max(1, _MAX_HASH_CACHE_PER_REPO // 10)
+            keys_to_remove = list(repo_cache.keys())[:to_remove]
+            for k in keys_to_remove:
+                del repo_cache[k]
+        repo_cache[filename] = hash_val
 
 
 def _clear_cached_hash(repo_name: str, filename: str) -> None:
