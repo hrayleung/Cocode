@@ -71,6 +71,11 @@ cocode --help
 
 **Note**: If you encounter errors with the pre-built wheels (e.g., `undefined symbol` errors), install from source instead (see below).
 
+### Windows Notes
+
+- `pip install cocode-mcp` works on Windows; if pip needs to build from source (editable install or Git URL), install the Rust toolchain and Visual Studio Build Tools ("Desktop development with C++").
+- Prefer `py -m pip install cocode-mcp` if multiple Python versions are installed.
+
 ### From Source (Recommended)
 
 Building from source ensures compatibility with your system and provides the latest features.
