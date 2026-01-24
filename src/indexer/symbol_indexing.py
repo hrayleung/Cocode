@@ -7,6 +7,7 @@ from code files, with embeddings for symbol-level search.
 import logging
 import threading
 import uuid
+from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -24,23 +25,44 @@ from src.storage.schema import get_create_symbols_table_sql, sanitize_repo_name
 
 logger = logging.getLogger(__name__)
 
-# In-memory cache of file hashes for incremental indexing
-_file_hash_cache: dict[str, dict[str, str]] = {}  # repo_name -> {filename -> hash}
+# In-memory LRU cache of file hashes for incremental indexing
+_file_hash_cache: dict[str, OrderedDict[str, str]] = {}  # repo_name -> OrderedDict{filename -> hash}
 _file_hash_cache_lock = threading.Lock()
+_MAX_HASH_CACHE_PER_REPO = 50000  # Limit per-repo cache size
 
 
 def _get_cached_hash(repo_name: str, filename: str) -> str | None:
-    """Get cached file hash if exists."""
+    """Get cached file hash if exists, updating LRU access order."""
     with _file_hash_cache_lock:
-        return _file_hash_cache.get(repo_name, {}).get(filename)
+        repo_cache = _file_hash_cache.get(repo_name)
+        if repo_cache is None:
+            return None
+        hash_val = repo_cache.get(filename)
+        if hash_val is not None:
+            # Move to end to mark as recently used
+            repo_cache.move_to_end(filename)
+        return hash_val
 
 
 def _set_cached_hash(repo_name: str, filename: str, hash_val: str) -> None:
-    """Cache file hash."""
+    """Cache file hash with LRU eviction."""
     with _file_hash_cache_lock:
         if repo_name not in _file_hash_cache:
-            _file_hash_cache[repo_name] = {}
-        _file_hash_cache[repo_name][filename] = hash_val
+            _file_hash_cache[repo_name] = OrderedDict()
+        repo_cache = _file_hash_cache[repo_name]
+
+        # Evict least recently used entries if at capacity
+        if len(repo_cache) >= _MAX_HASH_CACHE_PER_REPO and filename not in repo_cache:
+            # Remove ~10% of oldest (least recently used) entries
+            to_remove = max(1, _MAX_HASH_CACHE_PER_REPO // 10)
+            for _ in range(to_remove):
+                if repo_cache:
+                    # popitem(last=False) removes first (oldest) item
+                    repo_cache.popitem(last=False)
+
+        # Add/update entry and mark as most recently used
+        repo_cache[filename] = hash_val
+        repo_cache.move_to_end(filename)
 
 
 def _clear_cached_hash(repo_name: str, filename: str) -> None:

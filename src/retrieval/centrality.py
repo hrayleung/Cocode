@@ -102,7 +102,7 @@ def store_centrality_scores(repo_name: str, scores: dict[str, float]) -> None:
                 for i in range(0, len(items), batch_size):
                     cur.executemany(insert_sql, items[i:i + batch_size])
 
-        conn.commit()
+            conn.commit()
 
     _table_exists_cache.set(table_name, True)
     logger.info(f"Stored {len(scores)} centrality scores for {repo_name}")

@@ -377,13 +377,13 @@ def hybrid_search(
     bm25_config = BM25Config(k1=settings.bm25_k1, b=settings.bm25_b)
     include_sym = include_symbols and settings.enable_symbol_indexing
 
-    # Define search functions
+    # Define search functions - capture loop variables to avoid late binding bug
     searches = [
-        ("vector", lambda: vector_search(repo_name, query, top_k=rerank_count, query_embedding=embedding_cache.get())),
-        ("bm25", lambda: bm25_search(repo_name, query, top_k=rerank_count, config=bm25_config)),
+        ("vector", lambda ec=embedding_cache: vector_search(repo_name, query, top_k=rerank_count, query_embedding=ec.get())),
+        ("bm25", lambda cfg=bm25_config: bm25_search(repo_name, query, top_k=rerank_count, config=cfg)),
     ]
     if include_sym:
-        searches.append(("symbol", lambda: symbol_hybrid_search(repo_name, query, top_k=rerank_count, query_embedding=embedding_cache.get())))
+        searches.append(("symbol", lambda ec=embedding_cache: symbol_hybrid_search(repo_name, query, top_k=rerank_count, query_embedding=ec.get())))
 
     # Execute searches
     outcomes = _run_searches_parallel(searches) if parallel else _run_searches_sequential(searches)
@@ -397,12 +397,25 @@ def hybrid_search(
 
     logger.info("Search results: " + ", ".join(f"{k}={len(v.results)}" for k, v in outcomes.items()))
 
-    # Fuse results
-    result_lists = [outcomes["vector"].results, outcomes["bm25"].results]
-    weights = [vec_w, bm25_w]
+    # Fuse results - filter out empty lists to avoid division issues
+    result_lists = []
+    weights = []
+    if outcomes["vector"].results:
+        result_lists.append(outcomes["vector"].results)
+        weights.append(vec_w)
+    if outcomes["bm25"].results:
+        result_lists.append(outcomes["bm25"].results)
+        weights.append(bm25_w)
     if include_sym and outcomes.get("symbol") and outcomes["symbol"].results:
         result_lists.append(outcomes["symbol"].results)
         weights.append(sym_w)
+
+    if not result_lists:
+        logger.debug(
+            f"All search backends returned empty results for repo '{repo_name}' "
+            f"(query length: {len(query)} chars)"
+        )
+        return []
 
     candidates = reciprocal_rank_fusion(result_lists, weights=weights)[:rerank_count]
 
