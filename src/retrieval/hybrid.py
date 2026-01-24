@@ -413,7 +413,7 @@ def hybrid_search(
     if not result_lists:
         logger.debug(
             f"All search backends returned empty results for repo '{repo_name}' "
-            f"and query: {query[:100]}{'...' if len(query) > 100 else ''}"
+            f"(query length: {len(query)} chars)"
         )
         return []
 
