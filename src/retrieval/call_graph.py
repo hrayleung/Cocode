@@ -9,9 +9,10 @@ This module provides functionality for:
 import logging
 from collections import deque
 from dataclasses import dataclass
-from typing import Optional
+
 from psycopg import sql
-from psycopg.errors import UndefinedTable, InvalidSchemaName
+from psycopg.errors import UndefinedTable
+from psycopg.errors import UndefinedSchema
 
 from src.storage.postgres import get_connection
 from src.storage.schema import sanitize_repo_name
@@ -24,15 +25,15 @@ class CallEdge:
     """Represents a call relationship between two symbols."""
 
     source_symbol_id: str  # UUID of the calling symbol
-    target_symbol_id: Optional[str]  # UUID of the called symbol (None if unresolved)
+    target_symbol_id: str | None  # UUID of the called symbol (None if unresolved)
     edge_type: str  # 'calls', 'implements', 'extends', 'overrides'
     source_file: str
     source_line: int
-    target_file: Optional[str]
+    target_file: str | None
     target_symbol_name: str  # Name of the called function
-    target_line: Optional[int]
+    target_line: int | None
     confidence: float  # 1.0=exact, 0.7=partial, 0.5=unresolved
-    context: Optional[str] = None
+    context: str | None = None
 
 
 @dataclass
@@ -52,8 +53,8 @@ def resolve_call_to_symbol(
     repo_name: str,
     source_file: str,
     function_name: str,
-    object_name: Optional[str] = None,
-) -> tuple[Optional[str], Optional[str], float]:
+    object_name: str | None = None,
+) -> tuple[str | None, str | None, float]:
     """Resolve a function call to a symbol ID.
 
     Resolution strategy:

@@ -6,11 +6,12 @@ Creates a text search configuration optimized for source code that:
 - Preserves numbers and symbols in identifiers
 """
 
+import logging
+import threading
+
 from psycopg import sql
 
 from src.storage.postgres import get_connection
-import logging
-import threading
 
 logger = logging.getLogger(__name__)
 

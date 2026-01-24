@@ -51,7 +51,7 @@ This combination enables fast, accurate semantic search that stays up-to-date as
   - Install via [rustup](https://rustup.rs/): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
   - Includes `cargo` and the Rust compiler
 
-### Quick Install (Recommended)
+### Quick Install
 
 Install from PyPI using `pip`, `uvx`, or `pipx`:
 
@@ -69,7 +69,11 @@ pipx install cocode-mcp
 cocode --help
 ```
 
-### From Source
+**Note**: If you encounter errors with the pre-built wheels (e.g., `undefined symbol` errors), install from source instead (see below).
+
+### From Source (Recommended)
+
+Building from source ensures compatibility with your system and provides the latest features.
 
 #### Standard Installation
 
@@ -78,8 +82,11 @@ cocode --help
 git clone https://github.com/hrayleung/Cocode.git
 cd Cocode
 
-# Install dependencies and build Rust extensions (requires Rust toolchain)
-# This single command installs Python deps and builds the Rust extension in release mode
+# Install build tools (if not already installed)
+pip install maturin
+
+# Build and install Rust extensions + Python dependencies
+# This command builds the Rust extension in release mode and installs all dependencies
 maturin develop --release
 
 # Create .env file
@@ -116,14 +123,14 @@ The Nix flake automatically:
 # PostgreSQL (requires pgvector; server also attempts to CREATE EXTENSION pgcrypto)
 COCOINDEX_DATABASE_URL=postgresql://localhost:5432/cocode
 
-# Embeddings (choose one)
-OPENAI_API_KEY=sk-...          # Required unless using Jina late chunking
-JINA_API_KEY=jina_...          # Can run without OpenAI if USE_LATE_CHUNKING=true
-MISTRAL_API_KEY=...            # Optional (requires OPENAI_API_KEY as fallback)
+# Embeddings (choose at least one)
+OPENAI_API_KEY=sk-...          # OpenAI embeddings
+JINA_API_KEY=jina_...          # Jina late chunking (requires USE_LATE_CHUNKING=true)
+MISTRAL_API_KEY=...            # Mistral Codestral Embed
 
 # Select provider: jina, mistral, or openai (default: jina)
 EMBEDDING_PROVIDER=jina
-USE_LATE_CHUNKING=true
+USE_LATE_CHUNKING=true         # Required for Jina
 
 # Optional: Cohere reranking
 COHERE_API_KEY=...
@@ -459,7 +466,7 @@ psql -d cocode -c "SELECT * FROM pg_extension WHERE extname = 'vector';"
 **"Missing API key"**:
 - Set at least one embedding provider key
 - If using Jina: set both `JINA_API_KEY` and `USE_LATE_CHUNKING=true`
-- If using Mistral: set both `MISTRAL_API_KEY` and `OPENAI_API_KEY` (fallback)
+- If using Mistral: set `MISTRAL_API_KEY`
 
 **Silent Failures**:
 - Check for trailing commas in JSON configuration

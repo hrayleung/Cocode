@@ -1,14 +1,14 @@
 """Call graph indexing - extract and store function call relationships."""
 
 import logging
-from typing import Optional
+
+from psycopg import sql
 
 from src.parser import extract_calls_from_function, Symbol
 from src.parser.ast_parser import get_language_from_file
 from src.retrieval.call_graph import CallEdge, resolve_call_to_symbol, store_call_edge
 from src.storage.postgres import get_connection
 from src.storage.schema import sanitize_repo_name
-from psycopg import sql
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ def index_symbol_calls(repo_name: str, symbol: Symbol, filename: str, file_conte
     return edges_stored
 
 
-def _format_call_context(call) -> Optional[str]:
+def _format_call_context(call) -> str | None:
     """Format call context for storage."""
     contexts = []
     if call.is_recursive:
@@ -86,7 +86,7 @@ def _format_call_context(call) -> Optional[str]:
     return ", ".join(contexts) if contexts else None
 
 
-def get_symbol_id(repo_name: str, filename: str, symbol_name: str, line_start: int) -> Optional[str]:
+def get_symbol_id(repo_name: str, filename: str, symbol_name: str, line_start: int) -> str | None:
     """Get symbol UUID from database, or None if not found."""
     schema_name = sanitize_repo_name(repo_name)
     symbols_table = sql.Identifier(schema_name, "symbols")
@@ -101,7 +101,7 @@ def get_symbol_id(repo_name: str, filename: str, symbol_name: str, line_start: i
             return row[0] if row else None
 
 
-def get_symbol_line(repo_name: str, symbol_id: str) -> Optional[int]:
+def get_symbol_line(repo_name: str, symbol_id: str) -> int | None:
     """Get symbol line_start from database, or None if not found."""
     schema_name = sanitize_repo_name(repo_name)
     symbols_table = sql.Identifier(schema_name, "symbols")

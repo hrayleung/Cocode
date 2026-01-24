@@ -6,6 +6,7 @@ import signal
 import sys
 from pathlib import Path
 
+# Add parent directory to path for config imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastmcp import FastMCP
@@ -335,8 +336,12 @@ def main() -> None:
     """Main entry point for MCP server."""
     logger.info("Starting cocode MCP server...")
 
-    if not settings.openai_api_key and not (settings.jina_api_key and settings.use_late_chunking):
-        logger.error("OPENAI_API_KEY or JINA_API_KEY (with USE_LATE_CHUNKING=true) required")
+    if not any([
+        settings.openai_api_key,
+        settings.mistral_api_key,
+        settings.jina_api_key and settings.use_late_chunking
+    ]):
+        logger.error("At least one embedding provider API key required: OPENAI_API_KEY, MISTRAL_API_KEY, or JINA_API_KEY (with USE_LATE_CHUNKING=true)")
         sys.exit(1)
 
     try:
