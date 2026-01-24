@@ -198,6 +198,23 @@ class CachedFlow:
 _flow_cache: dict[str, CachedFlow] = {}
 _flow_cache_lock = threading.Lock()
 
+# Per-flow-name locks to prevent TOCTOU race conditions during flow creation.
+# Allows concurrent creation of different flows while serializing same flow.
+_flow_locks: dict[str, threading.Lock] = {}
+_flow_locks_lock = threading.Lock()
+
+
+def _get_flow_lock(flow_name: str) -> threading.Lock:
+    """Get or create a lock for a specific flow name.
+
+    Thread-safe method to obtain a lock specific to a flow name,
+    enabling fine-grained locking during flow creation.
+    """
+    with _flow_locks_lock:
+        if flow_name not in _flow_locks:
+            _flow_locks[flow_name] = threading.Lock()
+        return _flow_locks[flow_name]
+
 
 @cocoindex.op.function(behavior_version=1)
 def detect_language(filename: str) -> str:
@@ -299,118 +316,123 @@ def create_indexing_flow(
     included_key = tuple(included_patterns)
     excluded_key = tuple(excluded_patterns)
 
-    # Check cache for existing flow with matching configuration
-    with _flow_cache_lock:
-        cached = _flow_cache.get(flow_name)
-        if cached:
-            config_matches = (
-                cached.repo_path == repo_path
-                and cached.included_patterns == included_key
-                and cached.excluded_patterns == excluded_key
-            )
-            if config_matches:
-                return cached.flow
+    # Use per-flow-name lock to prevent TOCTOU race conditions
+    # Allows concurrent creation of different flows while serializing same flow
+    flow_lock = _get_flow_lock(flow_name)
+    with flow_lock:
+        # Check cache for existing flow with matching configuration
+        with _flow_cache_lock:
+            cached = _flow_cache.get(flow_name)
+            if cached:
+                config_matches = (
+                    cached.repo_path == repo_path
+                    and cached.included_patterns == included_key
+                    and cached.excluded_patterns == excluded_key
+                )
+                if config_matches:
+                    return cached.flow
 
-            # Configuration changed - close old flow before creating new one
-            try:
-                cached.flow.close()
-            except Exception as e:
-                logger.debug(f"Failed to close cached flow {flow_name}: {e}")
-            _flow_cache.pop(flow_name, None)
+                # Configuration changed - close old flow before creating new one
+                try:
+                    cached.flow.close()
+                except Exception as e:
+                    logger.debug(f"Failed to close cached flow {flow_name}: {e}")
+                _flow_cache.pop(flow_name, None)
 
-    def code_indexing_flow(
-        flow_builder: cocoindex.FlowBuilder,
-        data_scope: cocoindex.DataScope,
-    ):
-        # Select embedding function based on configuration
-        from src.embeddings.backend import get_selected_provider
+        def code_indexing_flow(
+            flow_builder: cocoindex.FlowBuilder,
+            data_scope: cocoindex.DataScope,
+        ):
+            # Select embedding function based on configuration
+            from src.embeddings.backend import get_selected_provider
 
-        provider = get_selected_provider()
-        if provider == "mistral":
-            embed_fn = text_to_embedding_mistral
-            logger.info("Using Mistral Codestral Embed")
-        elif provider == "jina":
-            embed_fn = text_to_embedding_jina
-            logger.info("Using Jina embeddings with late chunking")
-        else:
-            embed_fn = text_to_embedding_openai
-            logger.info("Using OpenAI embeddings")
+            provider = get_selected_provider()
+            if provider == "mistral":
+                embed_fn = text_to_embedding_mistral
+                logger.info("Using Mistral Codestral Embed")
+            elif provider == "jina":
+                embed_fn = text_to_embedding_jina
+                logger.info("Using Jina embeddings with late chunking")
+            else:
+                embed_fn = text_to_embedding_openai
+                logger.info("Using OpenAI embeddings")
 
-        # Source: read files from repository
-        data_scope["files"] = flow_builder.add_source(
-            cocoindex.sources.LocalFile(
-                path=repo_path,
-                included_patterns=included_patterns,
-                excluded_patterns=excluded_patterns,
-            )
-        )
-
-        # Collector for embeddings
-        code_embeddings = data_scope.add_collector()
-
-        # Process each file
-        with data_scope["files"].row() as file:
-            # Detect language from filename
-            file["language"] = file["filename"].transform(detect_language)
-
-            # Split code into semantic chunks (tree-sitter aware)
-            file["chunks"] = file["content"].transform(
-                cocoindex.functions.SplitRecursively(),
-                language=file["language"],
-                chunk_size=settings.chunk_size,
-                chunk_overlap=settings.chunk_overlap,
+            # Source: read files from repository
+            data_scope["files"] = flow_builder.add_source(
+                cocoindex.sources.LocalFile(
+                    path=repo_path,
+                    included_patterns=included_patterns,
+                    excluded_patterns=excluded_patterns,
+                )
             )
 
-            # Process each chunk
-            with file["chunks"].row() as chunk:
-                # Convert location Range to string for context header
-                chunk["location_str"] = chunk["location"].transform(range_to_str)
+            # Collector for embeddings
+            code_embeddings = data_scope.add_collector()
 
-                # Create contextual text for embedding (Anthropic's approach)
-                # Prepend file/language/location context for better retrieval
-                chunk["contextual_text"] = flow_builder.transform(
-                    add_context_header,
-                    file["filename"],
-                    file["language"],
-                    chunk["location_str"],
-                    chunk["text"],
+            # Process each file
+            with data_scope["files"].row() as file:
+                # Detect language from filename
+                file["language"] = file["filename"].transform(detect_language)
+
+                # Split code into semantic chunks (tree-sitter aware)
+                file["chunks"] = file["content"].transform(
+                    cocoindex.functions.SplitRecursively(),
+                    language=file["language"],
+                    chunk_size=settings.chunk_size,
+                    chunk_overlap=settings.chunk_overlap,
                 )
 
-                # Embed the contextual text using selected provider
-                # Jina: uses late chunking for ~24% better retrieval
-                # OpenAI: standard text-embedding-3-large
-                chunk["embedding"] = chunk["contextual_text"].call(embed_fn)
+                # Process each chunk
+                with file["chunks"].row() as chunk:
+                    # Convert location Range to string for context header
+                    chunk["location_str"] = chunk["location"].transform(range_to_str)
 
-                # Collect: store original content for display, contextual embedding
-                code_embeddings.collect(
-                    filename=file["filename"],
-                    location=chunk["location"],
-                    content=chunk["text"],  # Original content for display
-                    embedding=chunk["embedding"],  # Contextual embedding
-                )
+                    # Create contextual text for embedding (Anthropic's approach)
+                    # Prepend file/language/location context for better retrieval
+                    chunk["contextual_text"] = flow_builder.transform(
+                        add_context_header,
+                        file["filename"],
+                        file["language"],
+                        chunk["location_str"],
+                        chunk["text"],
+                    )
 
-        # Export to PostgreSQL with vector index
-        code_embeddings.export(
-            f"{repo_name}_chunks",
-            cocoindex.targets.Postgres(),
-            primary_key_fields=["filename", "location"],
-            vector_indexes=[
-                cocoindex.VectorIndexDef(
-                    field_name="embedding",
-                    metric=cocoindex.VectorSimilarityMetric.COSINE_SIMILARITY,
-                )
-            ],
-        )
+                    # Embed the contextual text using selected provider
+                    # Jina: uses late chunking for ~24% better retrieval
+                    # OpenAI: standard text-embedding-3-large
+                    chunk["embedding"] = chunk["contextual_text"].call(embed_fn)
 
-    flow = cocoindex.open_flow(flow_name, code_indexing_flow)
-    with _flow_cache_lock:
-        _flow_cache[flow_name] = CachedFlow(
-            flow=flow,
-            repo_path=repo_path,
-            included_patterns=included_key,
-            excluded_patterns=excluded_key,
-        )
-    return flow
+                    # Collect: store original content for display, contextual embedding
+                    code_embeddings.collect(
+                        filename=file["filename"],
+                        location=chunk["location"],
+                        content=chunk["text"],  # Original content for display
+                        embedding=chunk["embedding"],  # Contextual embedding
+                    )
+
+            # Export to PostgreSQL with vector index
+            code_embeddings.export(
+                f"{repo_name}_chunks",
+                cocoindex.targets.Postgres(),
+                primary_key_fields=["filename", "location"],
+                vector_indexes=[
+                    cocoindex.VectorIndexDef(
+                        field_name="embedding",
+                        metric=cocoindex.VectorSimilarityMetric.COSINE_SIMILARITY,
+                    )
+                ],
+            )
+
+        # Create flow (now protected by flow-specific lock)
+        flow = cocoindex.open_flow(flow_name, code_indexing_flow)
+        with _flow_cache_lock:
+            _flow_cache[flow_name] = CachedFlow(
+                flow=flow,
+                repo_path=repo_path,
+                included_patterns=included_key,
+                excluded_patterns=excluded_key,
+            )
+        return flow
 
 
 def get_cached_flow(repo_name: str):

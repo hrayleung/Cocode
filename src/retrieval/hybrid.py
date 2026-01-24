@@ -411,6 +411,10 @@ def hybrid_search(
         weights.append(sym_w)
 
     if not result_lists:
+        logger.debug(
+            f"All search backends returned empty results for repo '{repo_name}' "
+            f"and query: {query[:100]}{'...' if len(query) > 100 else ''}"
+        )
         return []
 
     candidates = reciprocal_rank_fusion(result_lists, weights=weights)[:rerank_count]
