@@ -177,11 +177,13 @@ class TestApplyCategoryBoosting:
     def test_boosting_reorders_results(self):
         """Test that boosting causes re-ordering based on file category."""
 
-        # Create mock results (need objects with filename and score attrs)
+        # Create mock results (need objects with filename, location, content, and score attrs)
         class MockResult:
-            def __init__(self, filename, score):
+            def __init__(self, filename, score, location="", content=""):
                 self.filename = filename
                 self.score = score
+                self.location = location
+                self.content = content
 
         results = [
             MockResult("test_foo.py", 0.9),      # Test file, high score
@@ -192,35 +194,45 @@ class TestApplyCategoryBoosting:
         # Before boosting, test_foo.py is first
         assert results[0].filename == "test_foo.py"
 
-        # Apply boosting
-        apply_category_boosting(results, sort=True)
+        # Apply boosting (returns new list, doesn't mutate input)
+        boosted = apply_category_boosting(results, sort=True)
 
         # After boosting:
         # - test_foo.py: 0.9 * 0.3 = 0.27
         # - README.md: 0.85 * 0.7 = 0.595
         # - manager.py: 0.8 * 1.0 = 0.8
         # So order should be: manager.py, README.md, test_foo.py
-        assert results[0].filename == "manager.py"
-        assert results[1].filename == "README.md"
-        assert results[2].filename == "test_foo.py"
+        assert boosted[0].filename == "manager.py"
+        assert boosted[1].filename == "README.md"
+        assert boosted[2].filename == "test_foo.py"
+
+        # Original list should be unchanged (immutable pattern)
+        assert results[0].filename == "test_foo.py"
+        assert results[0].score == 0.9
 
     def test_boosting_preserves_order_when_no_sort(self):
         """Test that results maintain order when sort=False."""
 
         class MockResult:
-            def __init__(self, filename, score):
+            def __init__(self, filename, score, location="", content=""):
                 self.filename = filename
                 self.score = score
+                self.location = location
+                self.content = content
 
         results = [
             MockResult("test_foo.py", 0.9),
             MockResult("manager.py", 0.8),
         ]
 
-        apply_category_boosting(results, sort=False)
+        boosted = apply_category_boosting(results, sort=False)
 
-        # Order preserved but scores modified
-        assert results[0].filename == "test_foo.py"
-        assert results[0].score == pytest.approx(0.27)  # 0.9 * 0.3
-        assert results[1].filename == "manager.py"
-        assert results[1].score == pytest.approx(0.8)
+        # Order preserved but scores modified in new list
+        assert boosted[0].filename == "test_foo.py"
+        assert boosted[0].score == pytest.approx(0.27)  # 0.9 * 0.3
+        assert boosted[1].filename == "manager.py"
+        assert boosted[1].score == pytest.approx(0.8)
+
+        # Original list should be unchanged
+        assert results[0].score == 0.9
+        assert results[1].score == 0.8
