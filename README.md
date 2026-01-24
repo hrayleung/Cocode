@@ -69,6 +69,11 @@ pipx install cocode-mcp
 cocode --help
 ```
 
+### Windows Notes
+
+- `pip install cocode-mcp` works on Windows; if pip needs to build from source (editable install or Git URL), install the Rust toolchain and Visual Studio Build Tools ("Desktop development with C++").
+- Prefer `py -m pip install cocode-mcp` if multiple Python versions are installed.
+
 ### From Source
 
 #### Standard Installation
