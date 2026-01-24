@@ -2,7 +2,9 @@
 
 import re
 from functools import lru_cache
+
 from config.settings import settings
+from src.models import SearchResult
 
 _CATEGORY_PATTERNS: dict[str, list[re.Pattern]] = {}
 
@@ -64,9 +66,20 @@ def get_category_boost(filename: str) -> float:
 
 
 def apply_category_boosting(results: list, sort: bool = True) -> list:
-    """Apply category-based score boosting to search results."""
+    """Apply category-based score boosting to search results.
+
+    Creates new result objects with boosted scores to avoid mutation.
+    """
+    boosted = []
     for result in results:
-        result.score *= get_category_boost(result.filename)
+        boost = get_category_boost(result.filename)
+        # Create new object with updated score (immutable pattern)
+        boosted.append(SearchResult(
+            filename=result.filename,
+            location=result.location,
+            content=result.content,
+            score=result.score * boost,
+        ))
     if sort:
-        results.sort(key=lambda r: r.score, reverse=True)
-    return results
+        boosted.sort(key=lambda r: r.score, reverse=True)
+    return boosted

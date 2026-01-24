@@ -413,7 +413,7 @@ def hybrid_search(
     # Apply boosting
     if settings.centrality_weight > 0:
         apply_centrality_boost(candidates, repo_name, settings.centrality_weight)
-    apply_category_boosting(candidates, sort=True)
+    candidates = apply_category_boosting(candidates, sort=True)
 
     # Optional reranking
     if use_reranker and settings.cohere_api_key and candidates:
@@ -422,7 +422,7 @@ def hybrid_search(
 
         if settings.centrality_weight > 0:
             apply_centrality_boost(reranked, repo_name, settings.centrality_weight)
-        apply_category_boosting(reranked, sort=True)
+        reranked = apply_category_boosting(reranked, sort=True)
 
         return reranked[:top_k]
 
