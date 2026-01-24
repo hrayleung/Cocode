@@ -2,7 +2,9 @@
 
 import re
 from functools import lru_cache
+
 from config.settings import settings
+from src.models import SearchResult
 
 _CATEGORY_PATTERNS: dict[str, list[re.Pattern]] = {}
 
@@ -72,7 +74,7 @@ def apply_category_boosting(results: list, sort: bool = True) -> list:
     for result in results:
         boost = get_category_boost(result.filename)
         # Create new object with updated score (immutable pattern)
-        boosted.append(type(result)(
+        boosted.append(SearchResult(
             filename=result.filename,
             location=result.location,
             content=result.content,
