@@ -211,13 +211,17 @@ class SearchService:
             related = expand_results_with_related(
                 repo_name, [r.filename for r in file_results], max_expansion=max_related
             )
+            existing_filenames = {r.filename for r in file_results}
             for filename in related or []:
+                if filename in existing_filenames:
+                    continue
                 file_results.append(CodeSnippet(
                     filename=filename,
                     content="[Related via imports]",
                     score=0.0,
                     is_reference_only=True,
                 ))
+                existing_filenames.add(filename)
         except Exception as e:
             logger.debug(f"Graph expansion failed: {e}")
 

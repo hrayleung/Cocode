@@ -22,3 +22,26 @@ def test_search_service_does_not_filter_away_requested_file_count(monkeypatch):
 
     assert [r.filename for r in results] == ["a.py", "b.py", "c.py"]
 
+
+def test_search_service_related_files_are_deduplicated(monkeypatch):
+    """Regression: related-file expansion should not add duplicate filenames."""
+
+    def fake_hybrid_search(*_args, **_kwargs):
+        return [
+            SearchResult(filename="a.py", location="1:1", content="a", score=0.9),
+            SearchResult(filename="b.py", location="1:1", content="b", score=0.8),
+        ]
+
+    def fake_expand_results_with_related(*_args, **_kwargs):
+        return ["b.py", "c.py", "c.py", "a.py"]
+
+    monkeypatch.setattr("src.retrieval.service.hybrid_search", fake_hybrid_search)
+    monkeypatch.setattr(
+        "src.retrieval.service.expand_results_with_related",
+        fake_expand_results_with_related,
+    )
+
+    results = SearchService().search(repo_name="repo", query="q", top_k=2, expand_related=True, max_related=4)
+
+    assert [r.filename for r in results] == ["a.py", "b.py", "c.py"]
+
